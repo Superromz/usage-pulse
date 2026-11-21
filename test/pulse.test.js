@@ -772,3 +772,148 @@ test('share: a self-contained SVG card with no cost or project names, colored li
   assert.ok(Object.keys(onCard).length >= 365, String(Object.keys(onCard).length));
   assert.deepStrictEqual(onCard, onPage);
 });
+
+// A pretend repository on a branch, and a stand-in for `gh` that answers from
+// gh-data.json and logs every call.
+function workRepo(home, branch, data) {
+  const repo = path.join(home, 'repo');
+  fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(repo, '.git', 'HEAD'), `ref: refs/heads/${branch}\n`);
+  fs.writeFileSync(path.join(repo, '.git', 'config'), '[remote "origin"]\n\turl = https://github.com/someone/project.git\n');
+  const fake = path.join(home, 'gh.js');
+  const setData = (d) => fs.writeFileSync(path.join(home, 'gh-data.json'), JSON.stringify(d));
+  setData(data);
+  fs.writeFileSync(fake, [
+    "const fs = require('fs'), p = require('path');",
+    'const a = process.argv.slice(2);',
+    "fs.appendFileSync(p.join(__dirname, 'gh-calls.log'), a.join(' ') + '\\n');",
+    "const d = JSON.parse(fs.readFileSync(p.join(__dirname, 'gh-data.json'), 'utf8'));",
+    "const key = a[0] === 'issue' && a[1] === 'view' ? 'issue ' + a[2] : a.slice(0, 2).join(' ');",
+    'if (!(key in d)) process.exit(1);',
+    'process.stdout.write(JSON.stringify(d[key]));',
+  ].join('\n'));
+  const calls = () => { try { return fs.readFileSync(path.join(home, 'gh-calls.log'), 'utf8'); } catch { return ''; } };
+  return { repo, setData, calls, extra: { PULSE_GH: fake, COLUMNS: '120', NO_COLOR: '1' } };
+}
+
+const MILESTONE = { title: '0.4.0: Orchestrator' };
+const milestoneIssues = [
+  { number: 19, title: 'Live pane', state: 'CLOSED', labels: [], body: '' },
+  { number: 20, title: 'Pipeline step', state: 'OPEN', labels: [], body: '## Dependencies\n- Depends on #19' },
+  { number: 21, title: 'Status line view', state: 'OPEN', labels: [], body: '- Depends on #19\n- Depends on #20' },
+  { number: 22, title: 'Docs pass', state: 'OPEN', labels: [{ name: 'blocked' }], body: '' },
+  { number: 23, title: 'Polish', state: 'OPEN', labels: [], body: 'Depends on #999' },
+];
+
+test('orchestrator: stage, issue, milestone and next step from GitHub, asked in the background', () => {
+  const { home, run } = sandbox();
+  const issue = { number: 20, title: 'Pipeline step', state: 'OPEN', milestone: MILESTONE };
+  const w = workRepo(home, 'feat/pipeline', { 'pr list': [], 'issue 20': issue, 'issue list': milestoneIssues });
+  const show = () => run('work.js', ['--dir', w.repo], '', w.extra);
+  const refresh = () => run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  const pr = (state, checks) => [{ number: 30, title: 'Pipeline step PR', state, body: 'Closes #20', milestone: MILESTONE, statusCheckRollup: checks }];
+
+  // Before GitHub was asked, the pane says so, and showing it never calls gh.
+  assert.match(show(), /Checking GitHub/);
+  assert.strictEqual(w.calls(), '');
+
+  // No pull request and no number in the branch: what it knows, and how to fix it.
+  refresh();
+  let out = show();
+  assert.match(out, /someone\/project · ⎇ feat\/pipeline/);
+  assert.match(out, /Stage +Implementing/);
+  assert.match(out, /No issue or pull request found for this branch/);
+
+  // An open PR that closes #20: In review with its CI, the issue's milestone and the next step.
+  const checks = [
+    [[{ status: 'COMPLETED', conclusion: 'SUCCESS' }, { state: 'SUCCESS' }], 'CI passing'],
+    [[{ status: 'COMPLETED', conclusion: 'SUCCESS' }, { status: 'COMPLETED', conclusion: 'FAILURE' }], 'CI failing'],
+    [[{ status: 'IN_PROGRESS', conclusion: '' }], 'CI pending'],
+  ];
+  for (const [rollup, ci] of checks) {
+    w.setData({ 'pr list': pr('OPEN', rollup), 'issue 20': issue, 'issue list': milestoneIssues });
+    refresh();
+    out = show();
+    assert.match(out, new RegExp(`Stage +In review · ${ci}`));
+  }
+  assert.match(out, /Issue +#20 Pipeline step/);
+  assert.match(out, /PR +#30 Pipeline step PR \(open\)/);
+  assert.match(out, /Milestone +0\.4\.0: Orchestrator +■□□□□ 1\/5/);
+  // #21 waits on the open #20 and #22 is labeled blocked. #23 depends on an
+  // issue outside the milestone, which isn't clearly blocking, so it's next.
+  assert.match(out, /Next +#23 Polish/);
+  assert.match(out, /✓ #19 Live pane/);
+  assert.match(out, /▶ #20 Pipeline step/);
+  assert.match(out, /⊘ #21 Status line view \(waits on #20\)/);
+  assert.match(out, /⊘ #22 Docs pass \(blocked\)/);
+  assert.doesNotMatch(out, /#23 Polish \(/);
+
+  // Merged: Shipped.
+  w.setData({ 'pr list': pr('MERGED', []), 'issue 20': issue, 'issue list': milestoneIssues });
+  refresh();
+  assert.match(show(), /Stage +Shipped/);
+});
+
+test('orchestrator: the issue comes from the branch name, and an issue without a milestone still shows', () => {
+  const { home, run } = sandbox();
+  const W = require(path.join(SCRIPTS, 'work.js'));
+  assert.strictEqual(W.issueFromBranch('feat/42-search'), 42);
+  assert.strictEqual(W.issueFromBranch('42-search'), 42);
+  assert.strictEqual(W.issueFromBranch('fix/issue-7'), 7);
+  assert.strictEqual(W.issueFromBranch('chore/expo-sdk-58'), null);
+  assert.strictEqual(W.issueFromBranch('feat/orchestrator'), null);
+  assert.strictEqual(W.issueFromText('This fixes #12 for good'), 12);
+  assert.strictEqual(W.issueFromText('See #12'), null);
+
+  const w = workRepo(home, 'feat/42-search', { 'pr list': [], 'issue 42': { number: 42, title: 'Search', state: 'OPEN', milestone: null } });
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  const out = run('work.js', ['--dir', w.repo], '', w.extra);
+  assert.match(out, /Issue +#42 Search/);
+  assert.match(out, /PR +none yet/);
+  assert.doesNotMatch(out, /Milestone|Next|No issue/);
+  assert.doesNotMatch(w.calls(), /issue list/);
+});
+
+test('orchestrator: no gh, no sign-in, no repository or a broken cache never crash it', () => {
+  const { home, run } = sandbox();
+  const w = workRepo(home, 'feat/x', {});
+  const show = (extra = {}) => run('work.js', ['--dir', w.repo], '', { ...w.extra, ...extra });
+
+  // gh missing.
+  run('work.js', ['--refresh', '--dir', w.repo], '', { ...w.extra, PULSE_GH: path.join(home, 'no-such-gh') });
+  assert.match(show(), /Install GitHub's gh command/);
+  // gh there but failing, as when signed out.
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  let out = show();
+  assert.match(out, /someone\/project · ⎇ feat\/x/);
+  assert.match(out, /gh couldn't reach GitHub/);
+  // A cache that isn't JSON reads as not asked yet.
+  const cache = fs.readdirSync(path.join(home, '.claude', 'pulse', 'work')).find((f) => f.endsWith('.json'));
+  fs.writeFileSync(path.join(home, '.claude', 'pulse', 'work', cache), '{oops');
+  assert.match(show(), /Checking GitHub/);
+  // Outside a repository.
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-norepo-'));
+  assert.match(run('work.js', ['--dir', elsewhere], '', w.extra), /not in a Git repository/);
+
+  // Lines stay inside a narrow pane, and plain mode has no symbols.
+  run('pulse.js', ['plain', 'on']);
+  out = show({ COLUMNS: '40' });
+  for (const line of out.split('\n')) assert.ok(strip(line).length <= 40, line);
+  assert.doesNotMatch(out, /[⎇…✓▶⊘■□]/);
+});
+
+test('orchestrator: the status line never asks GitHub', () => {
+  const { home, run } = sandbox();
+  const w = workRepo(home, 'feat/42-x', { 'pr list': [] });
+  run('statusline.js', [], JSON.stringify(payload({ cwd: w.repo, workspace: { current_dir: w.repo } })), w.extra);
+  assert.strictEqual(w.calls(), '');
+  assert.doesNotMatch(fs.readFileSync(path.join(SCRIPTS, 'statusline.js'), 'utf8'), /work\.js|\.\/work'/);
+});
+
+test('orchestrator command opens a pane next to Claude, or says how', () => {
+  const { home, run } = sandbox();
+  const out = run('pulse.js', ['orchestrator'], '', { WT_SESSION: '', TERM_PROGRAM: 'WarpTerminal' });
+  assert.match(out, /Split the window with (Ctrl\+Shift|Cmd)\+D in Warp/);
+  assert.match(out, /work\.js" --live --dir "/);
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'pulse', 'bin', 'work.js')));
+});

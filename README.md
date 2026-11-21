@@ -47,6 +47,7 @@ before, so `/usage-pulse:uninstall` can put it back.
 | `/usage-pulse:dashboard` | Print the full usage dashboard. |
 | `/usage-pulse:recap` | Last week at a glance (Monday to Sunday): tokens, replies, cost, active days, busiest day, top project and model, each compared with the week before. |
 | `/usage-pulse:live` | Keep the dashboard open next to Claude (also: `usage-pulse` in any terminal). |
+| `/usage-pulse:orchestrator` | Keep what you're working on open next to Claude: the branch's issue, pull request and CI, its milestone and the next step. See [The orchestrator](#the-orchestrator). |
 | `/usage-pulse:activity` | Open your activity page in the browser. |
 | `/usage-pulse:settings` | See every setting, or change one, like `/usage-pulse:settings colors red`. See [Settings](#settings). |
 | `/usage-pulse:colors red` | Shortcut for the activity grid colors: `green` (default), `red`, `blue` or `purple`. |
@@ -170,6 +171,26 @@ the activity grid to see that day's tokens and replies.
   cache. Each project also shows what it cost in the last 7 days and this month (a dash where no
   cost was recorded, such as before Usage Pulse was installed).
 
+## The orchestrator
+
+`/usage-pulse:orchestrator` opens what you're working on next to Claude, the same way
+`/usage-pulse:live` opens the dashboard, and keeps it up to date while you work. For the repository
+Claude is in, it shows:
+
+- **Stage**: Implementing (no pull request yet), In review (pull request open, with its CI:
+  passing, failing or pending) or Shipped (merged).
+- **Issue**: the issue the branch belongs to. It finds it from a number in the branch name (like
+  `feat/42-search`) or from "Closes #42" in the branch's pull request.
+- **PR**: the branch's pull request.
+- **Milestone**: the issue's milestone, how many of its issues are closed, and each issue with its
+  state. An issue counts as blocked only when GitHub clearly says so: a `blocked` label, or
+  "Depends on #N" where #N is still open in the same milestone.
+- **Next**: the next open issue in the milestone that isn't blocked.
+
+It asks GitHub through the [`gh` command](https://cli.github.com), in the background and about once a
+minute; the status line never does. Without `gh`, signed out, or outside a repository, it shows
+what it knows and says what's missing.
+
 ## Where the numbers come from
 
 - The status line numbers come straight from Claude Code, every second.
@@ -181,7 +202,8 @@ the activity grid to see that day's tokens and replies.
 - `/usage-pulse:export` covers the days Usage Pulse has read from that history, which has the
   breakdown by kind of token, project and model. Cost is left empty for days before it was recorded.
 
-Everything stays in `~/.claude/pulse/`. Nothing is sent anywhere.
+Everything stays in `~/.claude/pulse/`. Nothing is sent anywhere. The orchestrator only reads from
+GitHub, through your own `gh`.
 
 ## Where it works
 

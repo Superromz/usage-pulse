@@ -6,6 +6,9 @@ All notable changes to Usage Pulse are listed here. The format follows
 
 ## Unreleased
 
+### Added
+- `/usage-pulse:orchestrator` keeps what you're working on open next to Claude: the stage (Implementing, In review with CI, or Shipped), the branch's issue and pull request, its milestone's progress with each issue's state, and the next step. It asks GitHub through `gh` in the background; without it, it says what's missing.
+
 ## 0.3.0 - 2026-11-21
 
 ### Added

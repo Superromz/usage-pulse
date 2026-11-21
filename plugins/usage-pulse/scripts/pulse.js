@@ -8,6 +8,7 @@
 //   pulse.js export           save daily usage as CSV and JSON in ~/.claude/pulse/exports
 //   pulse.js share            make an SVG card of your year of activity and open it
 //   pulse.js live             open the live dashboard (split pane where the terminal allows it)
+//   pulse.js orchestrator     open what you're working on (issue, PR, milestone) next to Claude
 //   pulse.js settings [name] [value]  list every setting, or change one
 //   pulse.js colors <name>    colors of the activity grid (green, red, blue, purple)
 //   pulse.js activity         open the activity page in the browser
@@ -150,15 +151,13 @@ function share() {
   console.log('It shows your activity grid, tokens, active days and streaks; no cost or project names.');
 }
 
-// Open the live dashboard next to Claude. Windows Terminal can split itself;
-// other terminals get the command on the clipboard.
-function live() {
+// Open a live view next to Claude. Windows Terminal can split itself; other
+// terminals get the command on the clipboard.
+function openPane(what, file, args, cmd) {
   const { spawn, execSync } = require('child_process');
-  installScripts();
-  const cmd = installCommand() ? 'usage-pulse' : node('dash.js', ' --live');
   if (process.env.WT_SESSION) {
-    spawn('wt.exe', ['-w', '0', 'sp', '-V', '-s', '0.45', 'node', path.join(BIN, 'dash.js'), '--live'], { detached: true, stdio: 'ignore' }).unref();
-    console.log('Opened the live dashboard in a Windows Terminal split pane.');
+    spawn('wt.exe', ['-w', '0', 'sp', '-V', '-s', '0.45', 'node', path.join(BIN, file), ...args], { detached: true, stdio: 'ignore' }).unref();
+    console.log(`Opened the ${what} in a Windows Terminal split pane.`);
     return;
   }
   let copied = false;
@@ -172,6 +171,20 @@ function live() {
     : 'your terminal\'s split-pane shortcut';
   console.log(`Split the window with ${split}, then paste and run${copied ? ' (already copied to your clipboard)' : ''}:`);
   console.log(`  ${cmd}`);
+}
+
+function live() {
+  installScripts();
+  openPane('live dashboard', 'dash.js', ['--live'], installCommand() ? 'usage-pulse' : node('dash.js', ' --live'));
+}
+
+// What you're working on in this repository, next to Claude. Asking GitHub
+// starts now, so the pane has something to show when it opens.
+function orchestrator() {
+  installScripts();
+  const dir = process.cwd();
+  try { require('child_process').spawn(process.execPath, [path.join(BIN, 'work.js'), '--refresh', '--dir', dir], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch {}
+  openPane('orchestrator', 'work.js', ['--live', '--dir', dir], node('work.js', ` --live --dir "${dir.replace(/\\/g, '/')}"`));
 }
 
 // /usage-pulse:settings: list every setting, show one, or change one.
@@ -217,5 +230,5 @@ function activity() {
 const plain = (arg) => settings('plain', arg === 'on' || arg === 'off' ? arg : (L.loadConfig().ascii ? 'off' : 'on'));
 
 const [cmd, arg, value] = process.argv.slice(2);
-const commands = { setup, uninstall, dashboard, recap, doctor, export: exportUsage, share, live, activity, plain: () => plain(arg), colors: () => colors(arg), settings: () => settings(arg, value) };
-(commands[cmd] || (() => console.log('Usage: pulse.js setup|uninstall|dashboard|recap|doctor|export|share|live|activity|settings [name] [value]|plain <on|off>|colors <name>')))();
+const commands = { setup, uninstall, dashboard, recap, doctor, export: exportUsage, share, live, orchestrator, activity, plain: () => plain(arg), colors: () => colors(arg), settings: () => settings(arg, value) };
+(commands[cmd] || (() => console.log('Usage: pulse.js setup|uninstall|dashboard|recap|doctor|export|share|live|orchestrator|activity|settings [name] [value]|plain <on|off>|colors <name>')))();
