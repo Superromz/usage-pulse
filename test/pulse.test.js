@@ -91,12 +91,14 @@ test('medium terminals: summary and grid move under the two main rows', () => {
   assert.match(mid[1], /^Opus 5\.5/);
   assert.match(mid[2], /^⠀ +[A-Z][a-z]{2} /); // month names
   assert.match(mid[4], /^Lifetime {4}7\.5B tokens since Jan 23, 2026 {4}Mon {2}■/);
-  assert.strictEqual(weeks(mid, 4), 53); // the full year fits
+  // Count weeks on the Sunday row: every week has its Sunday, but on a Sunday
+  // the newest week has no Monday yet.
+  assert.strictEqual(weeks(mid, 3), 53); // the full year fits
   for (const r of mid) assert.ok([...r].length <= 169, r);
   // Narrower: fewer weeks, same layout.
   const narrow = at(110);
   assert.strictEqual(narrow.length, 10);
-  assert.ok(weeks(narrow, 4) >= 8 && weeks(narrow, 4) < 53, String(weeks(narrow, 4)));
+  assert.ok(weeks(narrow, 3) >= 8 && weeks(narrow, 3) < 53, String(weeks(narrow, 3)));
   // Too narrow for any grid: just the two main rows.
   const tiny = at(60);
   assert.strictEqual(tiny.length, 2);
