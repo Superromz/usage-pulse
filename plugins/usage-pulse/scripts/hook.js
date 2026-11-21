@@ -55,7 +55,19 @@ function record(p, now = Date.now()) {
   if (!rec.issue && prev && prev.root === rec.root && prev.issue) rec.issue = prev.issue;
   L.writeJSON(recordFile(p.session_id), rec);
   prune(now);
+  // Ask GitHub now, in the background, so the status line's orchestrator view
+  // (which only reads the cache) has the issue and milestone.
+  if (!process.env.PULSE_NO_REFRESH) try {
+    require('child_process').spawn(process.execPath, [path.join(__dirname, 'work.js'), '--refresh', '--dir', repo.root], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  } catch {}
   return rec;
+}
+
+// This session's record, whatever its age.
+function sessionRecord(sid) {
+  if (!sid) return null;
+  const r = L.readJSON(recordFile(sid), null);
+  return r && STEPS.includes(r.step) && typeof r.at === 'number' ? r : null;
 }
 
 // Records older than two days no longer count anywhere: remove them so the
@@ -83,7 +95,7 @@ function latestFor(root, maxAge, now = Date.now()) {
   return best;
 }
 
-module.exports = { STEPS, stepOf, issueOf, fromPayload, record, latestFor, PIPELINE_DIR };
+module.exports = { STEPS, stepOf, issueOf, fromPayload, record, latestFor, sessionRecord, PIPELINE_DIR };
 
 if (require.main === module) {
   try {

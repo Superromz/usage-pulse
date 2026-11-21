@@ -221,19 +221,21 @@ function ago(t, now) {
   return s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`;
 }
 
+// Keep a line within `width`; colors make it longer than it looks.
+function fit(s, width, ascii) {
+  if (L.visWidth(s) <= width) return s;
+  let out = '', w = 0;
+  for (const ch of s.split(/(\x1b\[[0-9;]*m)/)) {
+    if (ch.startsWith('\x1b')) { out += ch; continue; }
+    for (const c of ch) { if (w >= width - 1) break; out += c; w++; }
+  }
+  return `${out}${ascii ? '~' : '…'}${s.includes('\x1b') ? '\x1b[0m' : ''}`;
+}
+
 function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {}) {
   const a = cfg.ascii;
   const key = (k) => label(k.padEnd(11));
-  const cut = (s) => {
-    // Keep each line within the pane; colors make it longer than it looks.
-    if (L.visWidth(s) <= width) return s;
-    let out = '', w = 0;
-    for (const ch of s.split(/(\x1b\[[0-9;]*m)/)) {
-      if (ch.startsWith('\x1b')) { out += ch; continue; }
-      for (const c of ch) { if (w >= width - 1) break; out += c; w++; }
-    }
-    return `${out}${a ? '~' : '…'}${s.includes('\x1b') ? '\x1b[0m' : ''}`;
-  };
+  const cut = (s) => fit(s, width, a);
   // Explanations wrap at word boundaries instead of being cut.
   const wrap = (text) => text.split(' ').reduce((rows, word) => {
     const last = rows[rows.length - 1];
@@ -279,6 +281,45 @@ function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {})
   return lines.map(cut).join('\n');
 }
 
+// Short forms of MISSING for the status line.
+const MISSING_SHORT = {
+  'not-a-repo': 'not in a Git repository',
+  'no-branch': 'no branch checked out',
+  checking: 'checking GitHub...',
+  'no-gh': 'install gh to see issues and pull requests',
+  'gh-failed': 'gh can\'t reach GitHub (gh auth login)',
+  'no-issue': 'no issue or pull request for this branch',
+};
+
+// The orchestrator as up to two status line rows, each within `width`:
+//   Step [implement-it] next review-it   #20 Orchestrator: show the pipeline step…
+//   Milestone 0.4.0: See what… ■□□ 1/3   PR #22 open · CI passing   Next #21 Status line…
+function statusRows(v, { width = 200, cfg = L.loadConfig() } = {}) {
+  const a = cfg.ascii;
+  const GAP = '   ';
+  const ref = (i) => `${paint('cyan', `#${i.number}`)}${i.title ? ` ${i.title}` : ''}`;
+  const top = [];
+  if (v.step) top.push(`${label('Step')} ${paint('bold', paint('yellow', `[${v.step}]`))}${label(v.nextStep ? ` next ${v.nextStep}` : ' last step')}`);
+  else if (v.stage) top.push(`${label('Stage')} ${paint('bold', v.stage)}`);
+  else top.push(paint('bold', 'Orchestrator'));
+  if (v.issue) top.push(ref(v.issue));
+  else if (v.repo && v.repo.branch) top.push(paint('magenta', `${a ? 'branch' : '⎇'} ${v.repo.branch}`));
+
+  const bottom = [];
+  if (v.missing) bottom.push(label(MISSING_SHORT[v.missing]));
+  if (v.milestone) {
+    const m = v.milestone;
+    const boxes = m.total <= 12 ? ` ${paint('green', (a ? '#' : '■').repeat(m.done))}${label((a ? '.' : '□').repeat(m.total - m.done))}` : '';
+    bottom.push(`${label('Milestone')} ${m.title}${boxes} ${paint('white', `${m.done}/${m.total}`)}`);
+  }
+  if (v.pr) {
+    const ci = v.pr.state === 'open' && v.pr.ci !== 'none' ? ` ${label('·')} ${paint({ passing: 'green', failing: 'red', pending: 'yellow' }[v.pr.ci], `CI ${v.pr.ci}`)}` : '';
+    bottom.push(`${label('PR')} ${paint('cyan', `#${v.pr.number}`)} ${v.pr.state}${ci}`);
+  } else if (v.stage) bottom.push(`${label('PR')} ${label('none yet')}`);
+  if (v.next) bottom.push(`${label('Next')} ${ref(v.next)}`);
+  return [top, bottom].filter((r) => r.length).map((r) => fit(r.join(GAP), width, a));
+}
+
 function live(dir) {
   const footer = label('  Refreshes while you work. Press q to quit.');
   let asked = 0;
@@ -307,7 +348,7 @@ function live(dir) {
   setInterval(draw, 2000);
 }
 
-module.exports = { repoInfo, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
+module.exports = { statusRows, repoInfo, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
 
 if (require.main === module) {
   const args = process.argv.slice(2);

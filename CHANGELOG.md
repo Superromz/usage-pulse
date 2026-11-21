@@ -9,6 +9,7 @@ All notable changes to Usage Pulse are listed here. The format follows
 ### Added
 - `/usage-pulse:orchestrator` keeps what you're working on open next to Claude: the stage (Implementing, In review with CI, or Shipped), the branch's issue and pull request, its milestone's progress with each issue's state, and the next step. It asks GitHub through `gh` in the background; without it, it says what's missing.
 - The orchestrator follows the `lab-it` → `plan-it` → `implement-it` → `review-it` → `ship-it` skills: it shows which one this repository's session is on, and the next one, instead of the stage from GitHub.
+- While one of those skills is active, the status line shows what you're working on (step, issue, milestone, pull request and CI, next issue) instead of usage, and switches back about 10 minutes later. Pick it yourself with `/usage-pulse:settings mode auto|usage|orchestrator`.
 
 ## 0.3.0 - 2026-11-21
 

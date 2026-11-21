@@ -69,6 +69,7 @@ second, with no restart.
 | `plain` | `on`, `off` (default) | Plain text only: ASCII bars and symbols, for fonts that show boxes instead. |
 | `activity` | `on` (default), `off` | The lifetime summary and activity grid in the status line (`off` hides both). |
 | `layout` | `auto` (default), `compact` | `compact` keeps the status line to its two main rows at any width. |
+| `mode` | `auto` (default), `usage`, `orchestrator` | What the status line shows. `auto` shows usage, and what you're working on while a `lab-it` … `ship-it` skill is active. See [The orchestrator](#the-orchestrator). |
 | `grid` | `on` (default), `off` | The activity grid on its own. |
 | `summary` | `on` (default), `off` | The lifetime summary (lifetime, past year, streak, busiest day) on its own. |
 | `branch` | `on` (default), `off` | The git branch. |
@@ -205,6 +206,24 @@ Each repository shows the step of the session working in it, and nothing from ot
 issue also finds the milestone when the branch name doesn't say, such as a branch shared by a whole
 milestone. After two hours without one of these skills, the pane goes back to the stage from GitHub.
 The hook only writes to `~/.claude/pulse/pipeline/`, and never slows down or stops what Claude is doing.
+
+### In the status line
+
+While one of these skills is active in a session, that session's status line shows what you're
+working on instead of usage, in two rows:
+
+```
+Step [implement-it] next review-it   #20 Orchestrator: show the pipeline step…
+Milestone 0.4.0: See what you're working on ■□□ 1/3   PR #22 open · CI passing   Next #21 …
+```
+
+It goes back to usage about 10 minutes after the last of these skills started. Other sessions keep
+showing usage. Starting one of the skills also asks GitHub in the background, so the issue and
+milestone are there without opening the pane.
+
+`/usage-pulse:settings mode` chooses: `auto` (the default, as above), `usage` (always usage) or
+`orchestrator` (always what you're working on, with the stage from GitHub when no skill is active).
+The status line still only reads files: it never asks GitHub itself.
 
 ## Where the numbers come from
 

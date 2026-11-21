@@ -45,6 +45,10 @@ const OPTIONS = [
     help: 'auto fits as much as the terminal allows; compact keeps the status line to its two main rows.',
   },
   {
+    name: 'mode', key: 'mode', default: 'auto', values: ['auto', 'usage', 'orchestrator'],
+    help: 'What the status line shows: usage, or what you\'re working on (orchestrator). auto shows the orchestrator while a lab-it to ship-it skill is active in the session.',
+  },
+  {
     name: 'grid', key: 'grid', default: true, ...onOff,
     help: 'The activity grid in the status line.',
   },

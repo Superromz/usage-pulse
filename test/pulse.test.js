@@ -14,7 +14,7 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\]8;[^\x07]*\
 
 function sandbox() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-test-'));
-  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, PULSE_NO_CLIPBOARD: '1', PULSE_NO_OPEN: '1', PULSE_NOTIFY_LOG: path.join(home, 'notifications.log'), NO_COLOR: '', COLUMNS: '' };
+  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, PULSE_NO_CLIPBOARD: '1', PULSE_NO_OPEN: '1', PULSE_NO_REFRESH: '1', PULSE_NOTIFY_LOG: path.join(home, 'notifications.log'), NO_COLOR: '', COLUMNS: '' };
   const run = (file, args = [], input = '', extra = {}) => execFileSync(process.execPath, [path.join(SCRIPTS, file), ...args], { input, env: { ...env, ...extra }, encoding: 'utf8' });
   // Run lib/scan code inside the sandbox (they resolve HOME when they load).
   const js = (code) => JSON.parse(execFileSync(process.execPath, ['-e',
@@ -905,9 +905,12 @@ test('orchestrator: no gh, no sign-in, no repository or a broken cache never cra
 test('orchestrator: the status line never asks GitHub', () => {
   const { home, run } = sandbox();
   const w = workRepo(home, 'feat/42-x', { 'pr list': [] });
-  run('statusline.js', [], JSON.stringify(payload({ cwd: w.repo, workspace: { current_dir: w.repo } })), w.extra);
+  const input = JSON.stringify(payload({ cwd: w.repo, workspace: { current_dir: w.repo } }));
+  run('statusline.js', [], input, w.extra);
+  // Not even while it shows the orchestrator view.
+  run('pulse.js', ['settings', 'mode', 'orchestrator']);
+  assert.match(run('statusline.js', [], input, w.extra), /checking GitHub/);
   assert.strictEqual(w.calls(), '');
-  assert.doesNotMatch(fs.readFileSync(path.join(SCRIPTS, 'statusline.js'), 'utf8'), /work\.js|\.\/work'/);
 });
 
 test('orchestrator command opens a pane next to Claude, or says how', () => {
@@ -1017,4 +1020,69 @@ test('pipeline: the plugin registers the hook for skills and typed commands', ()
   const hooks = JSON.parse(fs.readFileSync(path.join(SCRIPTS, '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
   assert.strictEqual(hooks.PostToolUse[0].matcher, 'Skill');
   for (const h of [hooks.PostToolUse[0], hooks.UserPromptSubmit[0]]) assert.match(h.hooks[0].command, /^node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/hook\.js"$/);
+});
+
+test('status line mode: usage by default, the orchestrator while a pipeline skill is active in this session', () => {
+  const { home, run } = sandbox();
+  const issue = { number: 20, title: 'Pipeline step', state: 'OPEN', milestone: MILESTONE };
+  const pr = [{ number: 30, title: 'Pipeline step PR', state: 'OPEN', body: 'Closes #20', milestone: MILESTONE, statusCheckRollup: [{ status: 'COMPLETED', conclusion: 'SUCCESS' }] }];
+  const w = workRepo(home, 'feat/shared', { 'pr list': pr, 'issue 20': issue, 'issue list': milestoneIssues });
+  const line = (session = 'abc') => strip(run('statusline.js', [], JSON.stringify(payload({ session_id: session, cwd: w.repo, workspace: { current_dir: w.repo } })), { COLUMNS: '160' }));
+
+  // No pipeline activity: the usage view, the same as with `mode usage`.
+  const usage = line();
+  assert.match(usage, /^Context /);
+  run('pulse.js', ['settings', 'mode', 'usage']);
+  assert.strictEqual(line(), usage);
+  run('pulse.js', ['settings', 'mode', 'auto']);
+
+  // implement-it in session abc: abc's status line switches, another session's doesn't.
+  run('hook.js', [], skillUsed('abc', w.repo, 'implement-it', '#20'));
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  const [top, bottom, more] = line().split('\n');
+  assert.match(top, /^Step \[implement-it\] next review-it {3}#20 Pipeline step$/);
+  assert.match(bottom, /^Milestone 0\.4\.0: Orchestrator ■□□□□ 1\/5 {3}PR #30 open · CI passing {3}Next #23 Polish$/);
+  assert.strictEqual(more, undefined);
+  assert.match(line('someone-else'), /^Context /);
+
+  // Pinned to usage, the step doesn't switch it.
+  run('pulse.js', ['settings', 'mode', 'usage']);
+  assert.match(line(), /^Context /);
+  run('pulse.js', ['settings', 'mode', 'auto']);
+
+  // About 10 minutes without pipeline activity: back to usage.
+  const file = path.join(home, '.claude', 'pulse', 'pipeline', 'abc.json');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ ...rec, at: Date.now() - 11 * 60000 }));
+  assert.match(line(), /^Context /);
+
+  // Pinned to the orchestrator it stays, with the step while it still counts,
+  // then the stage from GitHub.
+  run('pulse.js', ['settings', 'mode', 'orchestrator']);
+  assert.match(line(), /^Step \[implement-it\]/);
+  fs.writeFileSync(file, JSON.stringify({ ...rec, at: Date.now() - 3 * 3600000 }));
+  assert.match(line(), /^Stage In review {3}#20 Pipeline step/);
+  assert.match(line('someone-else'), /^Stage In review/);
+});
+
+test('status line mode: the orchestrator rows fit any width, in plain mode too, with or without GitHub data', () => {
+  const { home, run } = sandbox();
+  const long = 'A very long issue title that keeps going well past the edge of any reasonable terminal window';
+  const issue = { number: 20, title: long, state: 'OPEN', milestone: MILESTONE };
+  const w = workRepo(home, 'feat/shared', { 'pr list': [], 'issue 20': issue, 'issue list': milestoneIssues.map((i) => (i.number === 23 ? { ...i, title: long } : i)) });
+  run('pulse.js', ['settings', 'mode', 'orchestrator']);
+  const rows = (cols) => strip(run('statusline.js', [], JSON.stringify(payload({ cwd: w.repo, workspace: { current_dir: w.repo } })), { COLUMNS: String(cols) })).split('\n');
+  const check = (cols) => { for (const r of rows(cols)) assert.ok([...r].length <= cols - 6, `${cols}: ${r}`); };
+
+  // Before GitHub was asked, and after.
+  for (const cols of [50, 90, 200]) check(cols);
+  assert.match(rows(90).join('\n'), /checking GitHub/);
+  run('hook.js', [], skillUsed('abc', w.repo, 'review-it', '#20'));
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  for (const cols of [50, 90, 200]) check(cols);
+  assert.match(rows(90)[0], /^Step \[review-it\] next ship-it {3}#20 A very long/);
+
+  run('pulse.js', ['plain', 'on']);
+  for (const cols of [50, 90, 200]) check(cols);
+  assert.doesNotMatch(rows(200).join('\n'), /[⎇…■□]/);
 });

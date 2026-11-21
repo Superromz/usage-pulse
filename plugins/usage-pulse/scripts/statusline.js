@@ -114,6 +114,22 @@ function refreshInBackground() {
   } catch {}
 }
 
+// What you're working on, in place of usage: always with `mode orchestrator`,
+// and with `mode auto` for 10 minutes after this session last started a
+// lab-it … ship-it skill (hook.js records it). Only files are read: the
+// session's record and the GitHub cache the orchestrator pane keeps.
+function workRows(input, cfg, now, cols) {
+  if (cfg.mode === 'usage') return null;
+  const H = require('./hook');
+  const rec = H.sessionRecord(input.session_id);
+  if (cfg.mode !== 'orchestrator' && !(rec && now - rec.at < 10 * 60000)) return null;
+  const W = require('./work');
+  const repo = W.repoInfo((input.workspace && input.workspace.current_dir) || input.cwd || process.cwd());
+  // Only this session's own step, and only while it still counts (2 hours).
+  const pipeline = rec && repo && rec.root === repo.root && now - rec.at < 2 * 3600000 ? rec : null;
+  return W.statusRows(W.view(repo, W.loadFacts(repo), pipeline), { width: cols || 200, cfg });
+}
+
 // Line the two rows up in columns: each cell is as wide as the widest cell
 // above or below it.
 function columns(rows) {
@@ -144,16 +160,22 @@ function main() {
   const cols = Math.max(0, (Number(process.env.COLUMNS) || 0) - (cfg.margin ?? 6));
 
   const rows = [];
-  let base = columns([gaugesRow(input, cfg, now), detailsRow(input, cfg, now)]);
-  // Too narrow: shorter wording, no column alignment.
-  if (cols && base.some((r) => L.visWidth(r) > cols)) base = [gaugesRow(input, cfg, now, true).join('  '), detailsRow(input, cfg, now).join('  ')];
-  // What to show beyond the two main rows: `activity` switches the grid and
-  // summary off together, `grid` and `summary` one at a time, and the compact
-  // layout keeps just the two main rows.
-  const extra = cfg.lifetime !== false && cfg.layout !== 'compact';
-  const show = { grid: extra && cfg.grid !== false, summary: extra && cfg.summary !== false };
-  const lt = show.grid || show.summary ? loadLifetime(now) : null;
-  rows.push(...(lt && cols ? withActivity(base, lt, cols, cfg, now, show) : base));
+  // Anything going wrong there leaves the usage view as it was.
+  let work = null;
+  try { work = workRows(input, cfg, now, cols); } catch {}
+  if (work) rows.push(...work);
+  else {
+    let base = columns([gaugesRow(input, cfg, now), detailsRow(input, cfg, now)]);
+    // Too narrow: shorter wording, no column alignment.
+    if (cols && base.some((r) => L.visWidth(r) > cols)) base = [gaugesRow(input, cfg, now, true).join('  '), detailsRow(input, cfg, now).join('  ')];
+    // What to show beyond the two main rows: `activity` switches the grid and
+    // summary off together, `grid` and `summary` one at a time, and the compact
+    // layout keeps just the two main rows.
+    const extra = cfg.lifetime !== false && cfg.layout !== 'compact';
+    const show = { grid: extra && cfg.grid !== false, summary: extra && cfg.summary !== false };
+    const lt = show.grid || show.summary ? loadLifetime(now) : null;
+    rows.push(...(lt && cols ? withActivity(base, lt, cols, cfg, now, show) : base));
+  }
   // A plan limit or the context window close to full: a warning on top, and
   // a desktop notification the first time.
   const over = A.crossings(input, cfg, now);
