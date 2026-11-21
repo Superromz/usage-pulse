@@ -191,6 +191,21 @@ It asks GitHub through the [`gh` command](https://cli.github.com), in the backgr
 minute; the status line never does. Without `gh`, signed out, or outside a repository, it shows
 what it knows and says what's missing.
 
+If you work through the `lab-it` → `plan-it` → `implement-it` → `review-it` → `ship-it` skills,
+the orchestrator follows along. Usage Pulse adds a small hook that notes which of these skills each
+Claude session runs, and the issue when it's clear (one issue number in what the skill was asked).
+The pane then shows **Step** instead of Stage, with the current skill in brackets, and **Next step**:
+
+```
+Step       lab-it ▶ plan-it ▶ [implement-it] ▶ review-it ▶ ship-it
+Next step  review-it
+```
+
+Each repository shows the step of the session working in it, and nothing from other sessions. That
+issue also finds the milestone when the branch name doesn't say, such as a branch shared by a whole
+milestone. After two hours without one of these skills, the pane goes back to the stage from GitHub.
+The hook only writes to `~/.claude/pulse/pipeline/`, and never slows down or stops what Claude is doing.
+
 ## Where the numbers come from
 
 - The status line numbers come straight from Claude Code, every second.

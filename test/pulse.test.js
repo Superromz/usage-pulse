@@ -917,3 +917,104 @@ test('orchestrator command opens a pane next to Claude, or says how', () => {
   assert.match(out, /work\.js" --live --dir "/);
   assert.ok(fs.existsSync(path.join(home, '.claude', 'pulse', 'bin', 'work.js')));
 });
+
+// What Claude Code hands the hook when a skill runs, or a prompt is sent.
+const skillUsed = (session, cwd, skill, args = '') => JSON.stringify({ session_id: session, hook_event_name: 'PostToolUse', cwd, tool_name: 'Skill', tool_input: { skill, args } });
+const promptSent = (session, cwd, prompt) => JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', cwd, prompt });
+
+test('pipeline: the hook reads the step and, only when unambiguous, the issue', () => {
+  const H = require(path.join(SCRIPTS, 'hook.js'));
+  assert.strictEqual(H.stepOf('implement-it'), 'implement-it');
+  assert.strictEqual(H.stepOf('/review-it'), 'review-it');
+  assert.strictEqual(H.stepOf('some-plugin:ship-it'), 'ship-it');
+  assert.strictEqual(H.stepOf('simplify'), null);
+  assert.strictEqual(H.issueOf('Implement Superromz/usage-pulse #20'), 20);
+  assert.strictEqual(H.issueOf('commit issue 42'), 42);
+  assert.strictEqual(H.issueOf('#19, then #20 and #21'), null);
+  assert.strictEqual(H.issueOf('the 0.4.0 milestone'), null);
+  const p = (o) => H.fromPayload({ session_id: 's', ...o });
+  assert.deepStrictEqual(p({ hook_event_name: 'UserPromptSubmit', prompt: '/implement-it #42' }), { step: 'implement-it', issue: 42 });
+  assert.strictEqual(p({ hook_event_name: 'UserPromptSubmit', prompt: 'please run implement-it' }), null);
+  assert.strictEqual(p({ hook_event_name: 'PostToolUse', tool_name: 'Skill', tool_input: { skill: 'code-review' } }), null);
+});
+
+test('pipeline: each session records its own step, shown only for its own repository', () => {
+  const { home, run } = sandbox();
+  const w = workRepo(home, 'feat/shared', {});
+  const other = path.join(home, 'other');
+  fs.mkdirSync(path.join(other, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(other, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  const show = (dir) => run('work.js', ['--dir', dir], '', w.extra);
+
+  // Nothing recorded: no pipeline anywhere.
+  assert.doesNotMatch(show(w.repo), /Step|lab-it/);
+
+  assert.strictEqual(run('hook.js', [], skillUsed('one', w.repo, 'implement-it', '#20')), '');
+  assert.strictEqual(run('hook.js', [], promptSent('two', other, '/plan-it the new search')), '');
+  let out = show(w.repo);
+  assert.match(out, /Step +lab-it ▶ plan-it ▶ \[implement-it\] ▶ review-it ▶ ship-it/);
+  assert.match(out, /Next step +review-it/);
+  out = show(other);
+  assert.match(out, /Step +lab-it ▶ \[plan-it\] ▶ implement-it/);
+  assert.match(out, /Next step +implement-it/);
+
+  // A later step without an issue keeps the session's issue; the last step has no next one.
+  run('hook.js', [], skillUsed('one', w.repo, 'ship-it'));
+  const rec = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'pulse', 'pipeline', 'one.json'), 'utf8'));
+  assert.strictEqual(rec.step, 'ship-it');
+  assert.strictEqual(rec.issue, 20);
+  assert.match(show(w.repo), /Next step +ship-it is the last step/);
+
+  // Recording also clears out records from sessions days ago.
+  const old = path.join(home, '.claude', 'pulse', 'pipeline', 'gone.json');
+  fs.writeFileSync(old, '{}');
+  const threeDaysAgo = new Date(Date.now() - 3 * 86400000);
+  fs.utimesSync(old, threeDaysAgo, threeDaysAgo);
+  run('hook.js', [], skillUsed('one', w.repo, 'ship-it'));
+  assert.ok(!fs.existsSync(old));
+  assert.ok(fs.existsSync(path.join(home, '.claude', 'pulse', 'pipeline', 'one.json')));
+});
+
+test('pipeline: a recent step wins over the stage from GitHub, an old one gives way to it', () => {
+  const { home, run } = sandbox();
+  const issue = { number: 20, title: 'Pipeline step', state: 'OPEN', milestone: MILESTONE };
+  const w = workRepo(home, 'feat/shared', { 'pr list': [], 'issue 20': issue, 'issue list': milestoneIssues });
+  const show = () => run('work.js', ['--dir', w.repo], '', w.extra);
+
+  // The branch name says nothing, so the recorded issue leads GitHub to it and its milestone.
+  run('hook.js', [], skillUsed('one', w.repo, 'review-it', 'review #20'));
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  let out = show();
+  assert.match(out, /Step +lab-it ▶ plan-it ▶ implement-it ▶ \[review-it\] ▶ ship-it/);
+  assert.doesNotMatch(out, /Stage/);
+  assert.match(out, /Issue +#20 Pipeline step/);
+  assert.match(out, /Milestone +0\.4\.0: Orchestrator/);
+  assert.match(out, /Next issue +#23 Polish/);
+
+  // Three hours later the step no longer counts: back to the stage from GitHub.
+  const file = path.join(home, '.claude', 'pulse', 'pipeline', 'one.json');
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ ...rec, at: Date.now() - 3 * 3600000 }));
+  out = show();
+  assert.match(out, /Stage +Implementing/);
+  assert.doesNotMatch(out, /Step|review-it/);
+});
+
+test('pipeline: a broken payload or record never fails the hook or the pane', () => {
+  const { home, run } = sandbox();
+  const w = workRepo(home, 'feat/x', {});
+  for (const input of ['', 'not json', '{}', JSON.stringify({ session_id: 'x', tool_name: 'Skill' }), skillUsed('x', path.join(home, 'nowhere'), 'implement-it')]) {
+    assert.strictEqual(run('hook.js', [], input), '');
+  }
+  const dir = path.join(home, '.claude', 'pulse', 'pipeline');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'bad.json'), '{oops');
+  fs.writeFileSync(path.join(dir, 'odd.json'), JSON.stringify({ root: w.repo, step: 'deploy-it', at: Date.now() }));
+  assert.doesNotMatch(run('work.js', ['--dir', w.repo], '', w.extra), /Step/);
+});
+
+test('pipeline: the plugin registers the hook for skills and typed commands', () => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(SCRIPTS, '..', 'hooks', 'hooks.json'), 'utf8')).hooks;
+  assert.strictEqual(hooks.PostToolUse[0].matcher, 'Skill');
+  for (const h of [hooks.PostToolUse[0], hooks.UserPromptSubmit[0]]) assert.match(h.hooks[0].command, /^node "\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/hook\.js"$/);
+});

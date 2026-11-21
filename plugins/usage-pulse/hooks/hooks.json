@@ -1,0 +1,16 @@
+{
+  "description": "Records which step of the lab-it to ship-it skills each session is on, for /usage-pulse:orchestrator.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.js\"", "timeout": 5 }]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.js\"", "timeout": 5 }]
+      }
+    ]
+  }
+}

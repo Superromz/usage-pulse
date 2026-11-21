@@ -27,6 +27,8 @@ const { paint } = L;
 const WORK_DIR = path.join(L.HOME, 'work');
 const STALE_MS = 60000;
 const LOCK_MS = 2 * 60000;
+// A pipeline step recorded longer ago than this no longer counts.
+const RECENT_MS = 2 * 3600000;
 const label = (s) => paint('gray', s);
 
 // The repository a folder belongs to: its top folder, branch and GitHub name.
@@ -101,8 +103,10 @@ function gh(args, cwd) {
 }
 
 // Ask GitHub about the branch: its pull request, its issue, the issue's
-// milestone and that milestone's issues. Returns what to cache.
-function fetchFacts(repo) {
+// milestone and that milestone's issues. Returns what to cache. `hint` is the
+// issue a pipeline skill was last asked about here, for branches whose name
+// and pull request don't say.
+function fetchFacts(repo, hint = null) {
   const facts = { at: Date.now(), branch: repo.branch };
   let prs;
   try { prs = gh(['pr', 'list', '--head', repo.branch, '--state', 'all', '--limit', '1', '--json', 'number,title,state,body,milestone,statusCheckRollup'], repo.root); } catch (e) {
@@ -111,7 +115,7 @@ function fetchFacts(repo) {
   const p = (prs || [])[0];
   if (p) facts.pr = { number: p.number, title: p.title, state: String(p.state).toLowerCase(), ci: ciStatus(p.statusCheckRollup) };
 
-  const n = issueFromBranch(repo.branch) || (p && issueFromText(p.body));
+  const n = issueFromBranch(repo.branch) || (p && issueFromText(p.body)) || hint;
   if (n) try {
     const i = gh(['issue', 'view', String(n), '--json', 'number,title,state,milestone'], repo.root);
     facts.issue = { number: i.number, title: i.title, state: String(i.state).toLowerCase() };
@@ -143,7 +147,8 @@ function refresh(repo) {
   try { if (Date.now() - fs.statSync(lock).mtimeMs < LOCK_MS) return null; } catch {}
   try { fs.writeFileSync(lock, String(process.pid)); } catch {}
   try {
-    const facts = fetchFacts(repo);
+    const rec = pipelineFor(repo);
+    const facts = fetchFacts(repo, rec && rec.issue);
     L.writeJSON(file, facts);
     return facts;
   } finally { try { fs.unlinkSync(lock); } catch {} }
@@ -155,6 +160,12 @@ function refreshInBackground(dir) {
   } catch {}
 }
 
+// The latest pipeline step recorded in this repository (hook.js), if recent.
+function pipelineFor(repo, now = Date.now()) {
+  if (!repo) return null;
+  try { return require('./hook').latestFor(repo.root, RECENT_MS, now); } catch { return null; }
+}
+
 // Blocked only when GitHub clearly says so: a "blocked" label, or a
 // "Depends on #N" whose issue is in this milestone and still open.
 function isBlocked(issue, all) {
@@ -163,14 +174,22 @@ function isBlocked(issue, all) {
   return (issue.dependsOn || []).some((d) => { const x = all.find((i) => i.number === d); return x && x.state === 'open'; });
 }
 
-// Everything the pane shows, worked out from the cached facts.
-function view(repo, facts) {
+// Everything the pane shows, worked out from the cached facts and the
+// recorded pipeline step. A recent step wins over the stage worked out from
+// GitHub.
+function view(repo, facts, pipeline = null) {
   const v = { repo, facts };
   if (!repo) return { ...v, missing: 'not-a-repo' };
   if (!repo.branch) return { ...v, missing: 'no-branch' };
+  if (pipeline) {
+    const { STEPS } = require('./hook');
+    v.step = pipeline.step;
+    v.nextStep = STEPS[STEPS.indexOf(pipeline.step) + 1] || null;
+  }
   if (!facts) return { ...v, missing: 'checking' };
   if (facts.error) return { ...v, missing: facts.error };
-  v.issue = facts.issue || null;
+  const listed = (n) => ((facts.milestone && facts.milestone.issues) || []).find((i) => i.number === n);
+  v.issue = facts.issue || (pipeline && pipeline.issue ? listed(pipeline.issue) || { number: pipeline.issue, title: '', state: 'open' } : null);
   v.pr = facts.pr || null;
   v.stage = v.pr && v.pr.state === 'merged' ? 'Shipped' : v.pr && v.pr.state === 'open' ? 'In review' : 'Implementing';
   if (facts.milestone) {
@@ -184,7 +203,7 @@ function view(repo, facts) {
     };
     v.next = v.milestone.issues.find((i) => i.state === 'open' && !i.blocked && !i.current) || null;
   }
-  if (!v.issue && !v.pr) v.missing = 'no-issue';
+  if (!v.issue && !v.pr && !v.step) v.missing = 'no-issue';
   return v;
 }
 
@@ -228,16 +247,23 @@ function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {})
   const updated = v.facts && v.facts.at ? label(`  updated ${ago(v.facts.at, now)}`) : '';
   lines.push(`${paint('bold', 'Orchestrator')}  ${where}${updated}`, '');
 
+  // The pipeline with the current step in brackets.
+  const pipelineMap = () => require('./hook').STEPS.map((s) => (s === v.step ? paint('bold', paint('yellow', `[${s}]`)) : label(s))).join(label(a ? ' > ' : ' ▶ '));
+  const nextStep = () => `${key('Next step')}${v.nextStep ? paint('white', v.nextStep) : label(`${v.step} is the last step`)}`;
+  if (v.step && !v.stage) lines.push(`${key('Step')}${pipelineMap()}`, nextStep());
   if (v.stage) {
     const ci = v.pr && v.pr.state === 'open' && v.pr.ci !== 'none' ? ` ${label('·')} ${paint({ passing: 'green', failing: 'red', pending: 'yellow' }[v.pr.ci], `CI ${v.pr.ci}`)}` : '';
-    lines.push(`${key('Stage')}${paint('bold', v.stage)}${ci}`);
+    if (v.step) lines.push(`${key('Step')}${pipelineMap()}${ci}`, nextStep());
+    else lines.push(`${key('Stage')}${paint('bold', v.stage)}${ci}`);
     lines.push(`${key('Issue')}${v.issue ? ref(v.issue) : label('none found')}`);
     lines.push(`${key('PR')}${v.pr ? `${ref(v.pr)} ${label(`(${v.pr.state})`)}` : label('none yet')}`);
     if (v.milestone) {
       const m = v.milestone;
       const boxes = m.total <= 30 ? ` ${paint('green', (a ? '#' : '■').repeat(m.done))}${label((a ? '.' : '□').repeat(m.total - m.done))}` : '';
       lines.push(`${key('Milestone')}${m.title} ${boxes} ${paint('white', `${m.done}/${m.total}`)}`);
-      lines.push(`${key('Next')}${v.next ? ref(v.next) : label(m.done === m.total ? 'nothing left in this milestone' : 'every open issue is waiting on another')}`);
+      const cur = m.issues.find((i) => i.current && i.state === 'open');
+      const none = m.done === m.total ? 'nothing left in this milestone' : cur ? `none besides #${cur.number}` : 'every open issue is waiting on another';
+      lines.push(`${key(v.step ? 'Next issue' : 'Next')}${v.next ? ref(v.next) : label(none)}`);
     }
   }
   if (v.missing) lines.push('', ...wrap(MISSING[v.missing]).map(label));
@@ -265,7 +291,7 @@ function live(dir) {
       refreshInBackground(dir);
     }
     let body;
-    try { body = render(view(repo, facts), { width: process.stdout.columns || 100 }); } catch { body = 'Orchestrator'; }
+    try { body = render(view(repo, facts, pipelineFor(repo)), { width: process.stdout.columns || 100 }); } catch { body = 'Orchestrator'; }
     process.stdout.write(`\x1b[H\x1b[2J${body}\n\n${footer}`);
   };
   const quit = () => { process.stdout.write('\x1b[?25h\x1b[?1049l'); process.exit(0); };
@@ -281,7 +307,7 @@ function live(dir) {
   setInterval(draw, 2000);
 }
 
-module.exports = { repoInfo, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile };
+module.exports = { repoInfo, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -292,7 +318,7 @@ if (require.main === module) {
   else {
     try {
       const repo = repoInfo(dir);
-      process.stdout.write(render(view(repo, loadFacts(repo)), { width: Number(process.env.COLUMNS) || process.stdout.columns || 100 }) + '\n');
+      process.stdout.write(render(view(repo, loadFacts(repo), pipelineFor(repo)), { width: Number(process.env.COLUMNS) || process.stdout.columns || 100 }) + '\n');
     } catch { process.stdout.write('Orchestrator\n'); }
   }
 }
