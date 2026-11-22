@@ -788,7 +788,7 @@ function workRepo(home, branch, data) {
     'const a = process.argv.slice(2);',
     "fs.appendFileSync(p.join(__dirname, 'gh-calls.log'), a.join(' ') + '\\n');",
     "const d = JSON.parse(fs.readFileSync(p.join(__dirname, 'gh-data.json'), 'utf8'));",
-    "const key = a[0] === 'issue' && a[1] === 'view' ? 'issue ' + a[2] : a.slice(0, 2).join(' ');",
+    "const key = a[0] === 'issue' && a[1] === 'view' ? 'issue ' + a[2] : a[0] === 'pr' && !a.includes('--head') ? 'open prs' : a.slice(0, 2).join(' ');",
     'if (!(key in d)) process.exit(1);',
     'process.stdout.write(JSON.stringify(d[key]));',
   ].join('\n'));
@@ -821,7 +821,7 @@ test('orchestrator: stage, issue, milestone and next step from GitHub, asked in 
   refresh();
   let out = show();
   assert.match(out, /someone\/project · ⎇ feat\/pipeline/);
-  assert.match(out, /Stage +Implementing/);
+  assert.match(out, /Stage Implementing/);
   assert.match(out, /No issue or pull request found for this branch/);
 
   // An open PR that closes #20: In review with its CI, the issue's milestone and the next step.
@@ -834,24 +834,32 @@ test('orchestrator: stage, issue, milestone and next step from GitHub, asked in 
     w.setData({ 'pr list': pr('OPEN', rollup), 'issue 20': issue, 'issue list': milestoneIssues });
     refresh();
     out = show();
-    assert.match(out, new RegExp(`Stage +In review · ${ci}`));
+    assert.match(out, /Stage In review/);
+    assert.match(out, new RegExp(`\\(open\\) · ${ci}`));
   }
-  assert.match(out, /Issue +#20 Pipeline step/);
-  assert.match(out, /PR +#30 Pipeline step PR \(open\)/);
-  assert.match(out, /Milestone +0\.4\.0: Orchestrator +■□□□□ 1\/5/);
+  assert.match(out, /PR #30 Pipeline step PR \(open\)/);
+  assert.match(out, /0\.4\.0: Orchestrator ■□□□□ 1\/5/);
   // #21 waits on the open #20 and #22 is labeled blocked. #23 depends on an
   // issue outside the milestone, which isn't clearly blocking, so it's next.
-  assert.match(out, /Next +#23 Polish/);
-  assert.match(out, /✓ #19 Live pane/);
-  assert.match(out, /▶ #20 Pipeline step/);
-  assert.match(out, /⊘ #21 Status line view \(waits on #20\)/);
-  assert.match(out, /⊘ #22 Docs pass \(blocked\)/);
-  assert.doesNotMatch(out, /#23 Polish \(/);
+  assert.match(out, /Next #23 Polish/);
+  // On the board: #20 (the PR's issue) in progress, #19 done, the rest to do,
+  // with why the blocked ones wait.
+  const W = require(path.join(SCRIPTS, 'work.js'));
+  const cache = path.join(home, '.claude', 'pulse', 'work', fs.readdirSync(path.join(home, '.claude', 'pulse', 'work')).find((f) => f.endsWith('.json')));
+  const cols = W.view(W.repoInfo(w.repo), JSON.parse(fs.readFileSync(cache, 'utf8'))).columns;
+  const nums = (c) => c.map((i) => i.number);
+  assert.deepStrictEqual([nums(cols.todo), nums(cols.doing), nums(cols.done)], [[21, 22, 23], [20], [19]]);
+  assert.match(out, /To do \(3\) +In progress \(1\) +Done \(1\)/);
+  assert.match(out, /│ #21 Status line view +│/);
+  assert.match(out, /│ waits on #20 +│/);
+  assert.match(out, /│ blocked +│/);
+  assert.match(out, /│ ▶ In review +│/);
+  assert.match(out, /│ ✓ done +│/);
 
   // Merged: Shipped.
   w.setData({ 'pr list': pr('MERGED', []), 'issue 20': issue, 'issue list': milestoneIssues });
   refresh();
-  assert.match(show(), /Stage +Shipped/);
+  assert.match(show(), /Stage Shipped/);
 });
 
 test('orchestrator: the issue comes from the branch name, and an issue without a milestone still shows', () => {
@@ -868,8 +876,9 @@ test('orchestrator: the issue comes from the branch name, and an issue without a
   const w = workRepo(home, 'feat/42-search', { 'pr list': [], 'issue 42': { number: 42, title: 'Search', state: 'OPEN', milestone: null } });
   run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
   const out = run('work.js', ['--dir', w.repo], '', w.extra);
-  assert.match(out, /Issue +#42 Search/);
-  assert.match(out, /PR +none yet/);
+  assert.match(out, /Issue #42 Search/);
+  assert.match(out, /PR none yet/);
+  assert.match(out, /In progress \(1\)[\s\S]*│ #42 Search +│/);
   assert.doesNotMatch(out, /Milestone|Next|No issue/);
   assert.doesNotMatch(w.calls(), /issue list/);
 });
@@ -955,18 +964,16 @@ test('pipeline: each session records its own step, shown only for its own reposi
   assert.strictEqual(run('hook.js', [], skillUsed('one', w.repo, 'implement-it', '#20')), '');
   assert.strictEqual(run('hook.js', [], promptSent('two', other, '/plan-it the new search')), '');
   let out = show(w.repo);
-  assert.match(out, /Step +lab-it ▶ plan-it ▶ \[implement-it\] ▶ review-it ▶ ship-it/);
-  assert.match(out, /Next step +review-it/);
+  assert.match(out, /Step lab-it ▶ plan-it ▶ \[implement-it\] ▶ review-it ▶ ship-it · next review-it/);
   out = show(other);
-  assert.match(out, /Step +lab-it ▶ \[plan-it\] ▶ implement-it/);
-  assert.match(out, /Next step +implement-it/);
+  assert.match(out, /Step lab-it ▶ \[plan-it\] ▶ implement-it ▶ review-it ▶ ship-it · next implement-it/);
 
   // A later step without an issue keeps the session's issue; the last step has no next one.
   run('hook.js', [], skillUsed('one', w.repo, 'ship-it'));
   const rec = JSON.parse(fs.readFileSync(path.join(home, '.claude', 'pulse', 'pipeline', 'one.json'), 'utf8'));
   assert.strictEqual(rec.step, 'ship-it');
   assert.strictEqual(rec.issue, 20);
-  assert.match(show(w.repo), /Next step +ship-it is the last step/);
+  assert.match(show(w.repo), /\[ship-it\] · last step/);
 
   // Recording also clears out records from sessions days ago.
   const old = path.join(home, '.claude', 'pulse', 'pipeline', 'gone.json');
@@ -988,18 +995,19 @@ test('pipeline: a recent step wins over the stage from GitHub, an old one gives 
   run('hook.js', [], skillUsed('one', w.repo, 'review-it', 'review #20'));
   run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
   let out = show();
-  assert.match(out, /Step +lab-it ▶ plan-it ▶ implement-it ▶ \[review-it\] ▶ ship-it/);
+  assert.match(out, /Step lab-it ▶ plan-it ▶ implement-it ▶ \[review-it\] ▶ ship-it/);
   assert.doesNotMatch(out, /Stage/);
-  assert.match(out, /Issue +#20 Pipeline step/);
-  assert.match(out, /Milestone +0\.4\.0: Orchestrator/);
-  assert.match(out, /Next issue +#23 Polish/);
+  assert.match(out, /In progress \(1\)[\s\S]*│ #20 Pipeline step +│/);
+  assert.match(out, /│ ▶ review-it +│/);
+  assert.match(out, /0\.4\.0: Orchestrator/);
+  assert.match(out, /Next issue #23 Polish/);
 
   // Three hours later the step no longer counts: back to the stage from GitHub.
   const file = path.join(home, '.claude', 'pulse', 'pipeline', 'one.json');
   const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
   fs.writeFileSync(file, JSON.stringify({ ...rec, at: Date.now() - 3 * 3600000 }));
   out = show();
-  assert.match(out, /Stage +Implementing/);
+  assert.match(out, /Stage Implementing/);
   assert.doesNotMatch(out, /Step|review-it/);
 });
 
@@ -1085,4 +1093,50 @@ test('status line mode: the orchestrator rows fit any width, in plain mode too, 
   run('pulse.js', ['plain', 'on']);
   for (const cols of [50, 90, 200]) check(cols);
   assert.doesNotMatch(rows(200).join('\n'), /[⎇…■□]/);
+});
+
+test('board: an issue with an open pull request is in progress, the rest by state', () => {
+  const { home, run } = sandbox();
+  const issue = { number: 20, title: 'Pipeline step', state: 'OPEN', milestone: MILESTONE };
+  const w = workRepo(home, 'feat/20-step', {
+    'pr list': [], 'issue 20': issue, 'issue list': milestoneIssues,
+    'open prs': [{ number: 41, body: 'Fixes #23', headRefName: 'fix/polish' }, { number: 42, body: '', headRefName: 'feat/999-elsewhere' }],
+  });
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  const W = require(path.join(SCRIPTS, 'work.js'));
+  const dir = path.join(home, '.claude', 'pulse', 'work');
+  const facts = JSON.parse(fs.readFileSync(path.join(dir, fs.readdirSync(dir).find((f) => f.endsWith('.json'))), 'utf8'));
+  const cols = W.view(W.repoInfo(w.repo), facts).columns;
+  const nums = (c) => c.map((i) => i.number);
+  // #20 from the branch name, #23 from an open PR; #21 and #22 blocked; #19 closed.
+  assert.deepStrictEqual([nums(cols.todo), nums(cols.doing), nums(cols.done)], [[21, 22], [20, 23], [19]]);
+  const out = run('work.js', ['--dir', w.repo], '', w.extra);
+  assert.match(out, /│ #23 Polish +│/);
+  assert.match(out, /│ pull request open +│/);
+  // Every issue on exactly one card.
+  for (const n of [19, 20, 21, 22, 23]) assert.strictEqual(out.split(`│ #${n} `).length - 1, 1, `#${n}`);
+});
+
+test('board: every line fits the pane, long titles wrap whole, columns stack when narrow, plain mode too', () => {
+  const { home, run } = sandbox();
+  const long = 'A very long issue title that keeps going well past the edge of any card and ends with ZEBRA';
+  const issue = { number: 20, title: long, state: 'OPEN', milestone: { title: 'A milestone whose title is also rather long for a narrow pane' } };
+  const w = workRepo(home, 'feat/20-a-branch-name-that-is-long-too', {
+    'pr list': [], 'issue 20': issue,
+    'issue list': milestoneIssues.map((i) => (i.number === 20 ? { ...i, title: long } : i)),
+  });
+  run('work.js', ['--refresh', '--dir', w.repo], '', w.extra);
+  const show = (cols) => strip(run('work.js', ['--dir', w.repo], '', { ...w.extra, COLUMNS: String(cols) }));
+  for (const plain of [false, true]) {
+    if (plain) run('pulse.js', ['plain', 'on']);
+    for (const cols of [40, 50, 60, 80, 120, 200]) {
+      const out = show(cols);
+      for (const line of out.split('\n')) assert.ok([...line].length <= cols, `${cols}: ${line}`);
+      assert.doesNotMatch(out, /…|~$/m);
+      assert.match(out, /ZEBRA/); // the whole title, wrapped
+      const together = out.split('\n').some((l) => /To do/.test(l) && /In progress/.test(l));
+      assert.strictEqual(together, cols >= 68, `${cols}: columns side by side only when they fit`);
+      if (plain) assert.doesNotMatch(out, /[╭╮╰╯┌┐└┘─│⎇·▶✓■□…]/);
+    }
+  }
 });

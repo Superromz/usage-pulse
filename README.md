@@ -176,17 +176,34 @@ the activity grid to see that day's tokens and replies.
 
 `/usage-pulse:orchestrator` opens what you're working on next to Claude, the same way
 `/usage-pulse:live` opens the dashboard, and keeps it up to date while you work. For the repository
-Claude is in, it shows:
+Claude is in, it shows a header and the milestone as a board:
 
-- **Stage**: Implementing (no pull request yet), In review (pull request open, with its CI:
-  passing, failing or pending) or Shipped (merged).
-- **Issue**: the issue the branch belongs to. It finds it from a number in the branch name (like
-  `feat/42-search`) or from "Closes #42" in the branch's pull request.
-- **PR**: the branch's pull request.
-- **Milestone**: the issue's milestone, how many of its issues are closed, and each issue with its
-  state. An issue counts as blocked only when GitHub clearly says so: a `blocked` label, or
-  "Depends on #N" where #N is still open in the same milestone.
-- **Next**: the next open issue in the milestone that isn't blocked.
+```
+╭──────────────────────────────────────────────────────────────────────────╮
+│ Orchestrator · Superromz/usage-pulse · ⎇ feat/42-search · 12s ago        │
+│ 0.4.0: See what you're working on ■■■□□ 3/5                              │
+│ Stage In review                                                          │
+│ PR #45 Search (open) · CI passing                                        │
+│ Next #43 Filters                                                         │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+To do (1)                 In progress (1)           Done (3)
+┌───────────────────────┐ ┌───────────────────────┐ ┌───────────────────────┐
+│ #43 Filters           │ │ #42 Search            │ │ #39 Settings page     │
+│ ready                 │ │ ▶ In review           │ │ ✓ done                │
+└───────────────────────┘ └───────────────────────┘ └───────────────────────┘
+```
+
+- **The header**: the repository and branch, the milestone with how many of its issues are closed,
+  the **Stage** (Implementing with no pull request yet, In review with its CI passing, failing or
+  pending, or Shipped once merged), the branch's pull request and the next issue to pick up.
+- **The board**: every issue of the milestone on a card. **In progress** is what's being worked on:
+  the branch's issue (from a number in the branch name, like `feat/42-search`, or "Closes #42" in
+  its pull request) and any issue with an open pull request. **Done** is closed. The rest is
+  **To do**, where a card says "waits on #N" or "blocked" when GitHub clearly says so (a `blocked`
+  label, or "Depends on #N" with #N still open in the same milestone).
+- Titles wrap onto as many lines as they need, and on a narrow pane the three columns stack. Resize
+  it any way you like: nothing gets cut off.
 
 It asks GitHub through the [`gh` command](https://cli.github.com), in the background and about once a
 minute; the status line never does. Without `gh`, signed out, or outside a repository, it shows
@@ -195,11 +212,11 @@ what it knows and says what's missing.
 If you work through the `lab-it` → `plan-it` → `implement-it` → `review-it` → `ship-it` skills,
 the orchestrator follows along. Usage Pulse adds a small hook that notes which of these skills each
 Claude session runs, and the issue when it's clear (one issue number in what the skill was asked).
-The pane then shows **Step** instead of Stage, with the current skill in brackets, and **Next step**:
+The header then shows **Step** instead of Stage, with the current skill in brackets and the next
+one, and that issue's card in progress says which skill is on it:
 
 ```
-Step       lab-it ▶ plan-it ▶ [implement-it] ▶ review-it ▶ ship-it
-Next step  review-it
+Step lab-it ▶ plan-it ▶ [implement-it] ▶ review-it ▶ ship-it · next review-it
 ```
 
 Each repository shows the step of the session working in it, and nothing from other sessions. That

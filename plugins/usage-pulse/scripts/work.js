@@ -1,13 +1,7 @@
 #!/usr/bin/env node
 // What you're working on: the branch, the issue it belongs to, its pull
-// request and CI, and the issue's milestone, from GitHub through `gh`.
-//
-//   Orchestrator  superromz/usage-pulse · ⎇ feat/19-orchestrator
-//   Stage      In review · CI passing
-//   Issue      #19 Orchestrator: open a live pane showing the current issue…
-//   PR         #22 Orchestrator pane (open)
-//   Milestone  0.4.0: See what you're working on  ■■■□□□□ 3/7
-//   Next       #20 Orchestrator: show the pipeline step…
+// request and CI, and the issue's milestone as a board (see render below),
+// from GitHub through `gh`.
 //
 // GitHub is only ever asked in the background (`--refresh`, behind a lock),
 // and what it said is kept in ~/.claude/pulse/work/. Everything else, the
@@ -133,6 +127,11 @@ function fetchFacts(repo, hint = null) {
         blockedLabel: (i.labels || []).some((l) => /^blocked\b/i.test(l.name)),
       })).sort((a, b) => a.number - b.number),
     };
+    // Issues with an open pull request count as in progress on the board.
+    try {
+      const open = gh(['pr', 'list', '--state', 'open', '--limit', '100', '--json', 'number,body,headRefName'], repo.root);
+      facts.milestone.withOpenPr = [...new Set(open.flatMap((o) => [issueFromBranch(o.headRefName), issueFromText(o.body)]).filter(Boolean))];
+    } catch {}
   } catch {}
   delete facts.milestoneTitle;
   return facts;
@@ -203,6 +202,15 @@ function view(repo, facts, pipeline = null) {
     };
     v.next = v.milestone.issues.find((i) => i.state === 'open' && !i.blocked && !i.current) || null;
   }
+  // The board: Done when closed; In progress while being worked on (the
+  // current issue, or one with an open pull request); To do otherwise.
+  const withPr = (facts.milestone && facts.milestone.withOpenPr) || [];
+  const cards = v.milestone ? v.milestone.issues : v.issue ? [{ ...v.issue, current: true, blocked: false, waitsOn: [] }] : [];
+  v.columns = { todo: [], doing: [], done: [] };
+  for (const i of cards) {
+    const col = i.state === 'closed' ? 'done' : i.current || withPr.includes(i.number) ? 'doing' : 'todo';
+    v.columns[col].push({ ...i, openPr: withPr.includes(i.number) });
+  }
   if (!v.issue && !v.pr && !v.step) v.missing = 'no-issue';
   return v;
 }
@@ -232,53 +240,127 @@ function fit(s, width, ascii) {
   return `${out}${ascii ? '~' : '…'}${s.includes('\x1b') ? '\x1b[0m' : ''}`;
 }
 
+// Word-wrap pieces of text to `width` columns. Each piece is [text, style];
+// words are styled one by one, so a wrapped line never loses its color, and
+// a word longer than the line is split. ['\n'] starts a new line.
+function wrapPieces(pieces, width) {
+  const lines = [];
+  let line = '', w = 0;
+  const push = () => { lines.push(line); line = ''; w = 0; };
+  for (const [text, style = (s) => s] of pieces) {
+    if (text === '\n') { push(); continue; }
+    for (let word of String(text).split(' ')) {
+      if (!word) continue;
+      // Too long for a line: split it (only plain words; colored ones are short).
+      while (!word.includes('\x1b') && [...word].length > width) {
+        if (w) push();
+        lines.push(style([...word].slice(0, width).join('')));
+        word = [...word].slice(width).join('');
+      }
+      if (!word) continue;
+      const n = L.visWidth(word);
+      if (w && w + 1 + n > width) push();
+      line += (w ? ' ' : '') + style(word);
+      w += (w ? 1 : 0) + n;
+    }
+  }
+  if (w || !lines.length) push();
+  return lines;
+}
+
+// Lines inside a box exactly `width` wide.
+function boxed(lines, width, ch, color) {
+  const edge = (s) => paint(color, s);
+  return [
+    edge(ch.tl + ch.h.repeat(width - 2) + ch.tr),
+    ...lines.map((l) => `${edge(ch.v)} ${L.padVis(l, width - 4)} ${edge(ch.v)}`),
+    edge(ch.bl + ch.h.repeat(width - 2) + ch.br),
+  ];
+}
+
+// The pane: a header box with where you are, then the milestone as a board.
+//
+//   ╭──────────────────────────────────────────────────────────────╮
+//   │ Orchestrator · Superromz/usage-pulse · ⎇ feat/x · 12s ago     │
+//   │ 0.4.0: See what you're working on ■■□ 2/3                     │
+//   │ Step lab-it ▶ plan-it ▶ [implement-it] ▶ review-it ▶ ship-it  │
+//   │ PR none yet · Next #23 Board                                  │
+//   ╰──────────────────────────────────────────────────────────────╯
+//   To do (1)            In progress (1)      Done (2)
+//   ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────┐
+//   │ #23 Board        │ │ #21 Status line  │ │ #19 Live pane    │
+//   …
+// Three columns side by side when there's room, stacked otherwise. Every
+// line fits `width`; nothing is cut off.
 function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {}) {
   const a = cfg.ascii;
-  const key = (k) => label(k.padEnd(11));
-  const cut = (s) => fit(s, width, a);
-  // Explanations wrap at word boundaries instead of being cut.
-  const wrap = (text) => text.split(' ').reduce((rows, word) => {
-    const last = rows[rows.length - 1];
-    if (last && (last + ' ' + word).length <= width) rows[rows.length - 1] = `${last} ${word}`;
-    else rows.push(word);
-    return rows;
-  }, []);
-  const ref = (i) => `${paint('cyan', `#${i.number}`)} ${i.title}`;
-  const lines = [];
-  const where = v.repo ? `${paint('bold', v.repo.name || path.basename(v.repo.root))}${v.repo.branch ? ` ${label('·')} ${paint('magenta', `${a ? 'branch' : '⎇'} ${v.repo.branch}`)}` : ''}` : '';
-  const updated = v.facts && v.facts.at ? label(`  updated ${ago(v.facts.at, now)}`) : '';
-  lines.push(`${paint('bold', 'Orchestrator')}  ${where}${updated}`, '');
+  width = Math.max(20, width);
+  const HEAD = a ? { tl: '+', tr: '+', bl: '+', br: '+', h: '-', v: '|' } : { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
+  const CARD = a ? HEAD : { tl: '┌', tr: '┐', bl: '└', br: '┘', h: '─', v: '│' };
+  const gray = (s) => label(s), bold = (s) => paint('bold', s), cyan = (s) => paint('cyan', s);
+  const dot = [a ? '-' : '·', gray];
+  const CI = { passing: 'green', failing: 'red', pending: 'yellow' };
 
-  // The pipeline with the current step in brackets.
-  const pipelineMap = () => require('./hook').STEPS.map((s) => (s === v.step ? paint('bold', paint('yellow', `[${s}]`)) : label(s))).join(label(a ? ' > ' : ' ▶ '));
-  const nextStep = () => `${key('Next step')}${v.nextStep ? paint('white', v.nextStep) : label(`${v.step} is the last step`)}`;
-  if (v.step && !v.stage) lines.push(`${key('Step')}${pipelineMap()}`, nextStep());
+  // Header.
+  const head = [['Orchestrator', bold]];
+  if (v.repo) {
+    head.push(dot, [v.repo.name || path.basename(v.repo.root), bold]);
+    if (v.repo.branch) head.push(dot, [`${a ? 'branch' : '⎇'} ${v.repo.branch}`, (s) => paint('magenta', s)]);
+  }
+  if (v.facts && v.facts.at) head.push(dot, [ago(v.facts.at, now), gray]);
+  if (v.milestone) {
+    const m = v.milestone;
+    head.push(['\n'], [m.title]);
+    // Done and left as one word, so they stay together.
+    if (m.total <= 30) head.push([paint('green', (a ? '#' : '■').repeat(m.done)) + gray((a ? '.' : '□').repeat(m.total - m.done))]);
+    head.push([`${m.done}/${m.total}`, (s) => paint('white', s)]);
+  }
+  if (v.step) {
+    head.push(['\n'], ['Step', gray]);
+    require('./hook').STEPS.forEach((s, i) => {
+      if (i) head.push([a ? '>' : '▶', gray]);
+      head.push(s === v.step ? [`[${s}]`, (x) => bold(paint('yellow', x))] : [s, gray]);
+    });
+    head.push(dot, v.nextStep ? ['next', gray] : ['last step', gray]);
+    if (v.nextStep) head.push([v.nextStep, (s) => paint('white', s)]);
+  } else if (v.stage) head.push(['\n'], ['Stage', gray], [v.stage, bold]);
   if (v.stage) {
-    const ci = v.pr && v.pr.state === 'open' && v.pr.ci !== 'none' ? ` ${label('·')} ${paint({ passing: 'green', failing: 'red', pending: 'yellow' }[v.pr.ci], `CI ${v.pr.ci}`)}` : '';
-    if (v.step) lines.push(`${key('Step')}${pipelineMap()}${ci}`, nextStep());
-    else lines.push(`${key('Stage')}${paint('bold', v.stage)}${ci}`);
-    lines.push(`${key('Issue')}${v.issue ? ref(v.issue) : label('none found')}`);
-    lines.push(`${key('PR')}${v.pr ? `${ref(v.pr)} ${label(`(${v.pr.state})`)}` : label('none yet')}`);
-    if (v.milestone) {
-      const m = v.milestone;
-      const boxes = m.total <= 30 ? ` ${paint('green', (a ? '#' : '■').repeat(m.done))}${label((a ? '.' : '□').repeat(m.total - m.done))}` : '';
-      lines.push(`${key('Milestone')}${m.title} ${boxes} ${paint('white', `${m.done}/${m.total}`)}`);
-      const cur = m.issues.find((i) => i.current && i.state === 'open');
-      const none = m.done === m.total ? 'nothing left in this milestone' : cur ? `none besides #${cur.number}` : 'every open issue is waiting on another';
-      lines.push(`${key(v.step ? 'Next issue' : 'Next')}${v.next ? ref(v.next) : label(none)}`);
-    }
+    head.push(['\n'], ['PR', gray]);
+    if (v.pr) {
+      head.push([`#${v.pr.number}`, cyan], [v.pr.title], [`(${v.pr.state})`, gray]);
+      if (v.pr.state === 'open' && v.pr.ci !== 'none') head.push(dot, [`CI ${v.pr.ci}`, (s) => paint(CI[v.pr.ci], s)]);
+    } else head.push(['none yet', gray]);
+    if (!v.milestone && v.issue) head.push(['\n'], ['Issue', gray], [`#${v.issue.number}`, cyan], [v.issue.title]);
+    if (v.next) head.push(['\n'], [v.step ? 'Next issue' : 'Next', gray], [`#${v.next.number}`, cyan], [v.next.title]);
   }
-  if (v.missing) lines.push('', ...wrap(MISSING[v.missing]).map(label));
+  const lines = boxed(wrapPieces(head, width - 4), width, HEAD, 'gray');
+  if (v.missing) lines.push('', ...wrapPieces([[MISSING[v.missing], gray]], width));
 
-  if (v.milestone && v.milestone.issues.length) {
-    lines.push('', label('Issues'));
-    for (const i of v.milestone.issues) {
-      const mark = i.state === 'closed' ? paint('green', a ? 'x' : '✓') : i.current ? paint('yellow', a ? '>' : '▶') : i.blocked ? paint('red', a ? '!' : '⊘') : label(a ? '-' : '·');
-      const waits = i.blocked && i.waitsOn.length ? label(` (waits on ${i.waitsOn.map((n) => `#${n}`).join(', ')})`) : i.blocked ? label(' (blocked)') : '';
-      lines.push(` ${mark} ${i.state === 'closed' ? label(`#${i.number} ${i.title}`) : ref(i)}${waits}`);
-    }
+  // Board.
+  const cols = v.columns;
+  if (cols && cols.todo.length + cols.doing.length + cols.done.length) {
+    const three = width >= 3 * 22 + 2;
+    const colW = three ? Math.floor((width - 2) / 3) : width;
+    const card = (i, col) => {
+      const status = col === 'done' ? [a ? 'x done' : '✓ done', (s) => paint('green', s)]
+        : i.current ? [`${a ? '>' : '▶'} ${v.step || v.stage || 'in progress'}`, (s) => paint('yellow', s)]
+        : i.openPr ? ['pull request open', (s) => paint('cyan', s)]
+        : i.blocked ? [i.waitsOn && i.waitsOn.length ? `waits on ${i.waitsOn.map((n) => `#${n}`).join(', ')}` : 'blocked', (s) => paint('red', s)]
+        : ['ready', gray];
+      const body = wrapPieces([[`#${i.number}`, cyan], [i.title || '', col === 'done' ? gray : (s) => s], ['\n'], status], colW - 4);
+      return boxed(body, colW, CARD, col === 'doing' ? 'yellow' : 'gray');
+    };
+    const columns = [['To do', 'todo'], ['In progress', 'doing'], ['Done', 'done']].map(([name, key]) => [
+      bold(`${name} (${cols[key].length})`),
+      ...cols[key].flatMap((i) => card(i, key)),
+    ]);
+    lines.push('');
+    if (three) {
+      const rows = Math.max(...columns.map((c) => c.length));
+      for (let r = 0; r < rows; r++) lines.push(columns.map((c, k) => (k < 2 ? L.padVis(c[r] || '', colW) : c[r] || '')).join(' ').replace(/\s+$/, ''));
+    } else columns.forEach((c, k) => lines.push(...(k ? [''] : []), ...c));
   }
-  return lines.map(cut).join('\n');
+  return lines.join('\n');
 }
 
 // Short forms of MISSING for the status line.
@@ -321,7 +403,7 @@ function statusRows(v, { width = 200, cfg = L.loadConfig() } = {}) {
 }
 
 function live(dir) {
-  const footer = label('  Refreshes while you work. Press q to quit.');
+  const footer = (w) => wrapPieces([['Refreshes while you work. Press q to quit.', label]], w).join('\n');
   let asked = 0;
   const draw = () => {
     const repo = repoInfo(dir);
@@ -332,8 +414,9 @@ function live(dir) {
       refreshInBackground(dir);
     }
     let body;
-    try { body = render(view(repo, facts, pipelineFor(repo)), { width: process.stdout.columns || 100 }); } catch { body = 'Orchestrator'; }
-    process.stdout.write(`\x1b[H\x1b[2J${body}\n\n${footer}`);
+    const width = process.stdout.columns || 100;
+    try { body = render(view(repo, facts, pipelineFor(repo)), { width }); } catch { body = 'Orchestrator'; }
+    process.stdout.write(`\x1b[H\x1b[2J${body}\n\n${footer(width)}`);
   };
   const quit = () => { process.stdout.write('\x1b[?25h\x1b[?1049l'); process.exit(0); };
   process.stdout.write('\x1b[?1049h\x1b[?25l');
