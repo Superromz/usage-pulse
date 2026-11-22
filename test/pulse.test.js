@@ -1140,3 +1140,67 @@ test('board: every line fits the pane, long titles wrap whole, columns stack whe
     }
   }
 });
+
+test('parent folder: the pane and status line follow the repository below it where a pipeline skill ran', () => {
+  const { home, run } = sandbox();
+  const H = require(path.join(SCRIPTS, 'hook.js'));
+  assert.ok(H.isBelow(home, path.join(home, 'repo')));
+  assert.ok(!H.isBelow(home, home));
+  assert.ok(!H.isBelow(path.join(home, 'repo'), home));
+
+  const w = workRepo(home, 'feat/shared', {});
+  const status = () => strip(run('statusline.js', [], JSON.stringify(payload({ session_id: 'abc', cwd: home, workspace: { current_dir: home } })), { COLUMNS: '160' }));
+  // Nothing ran anywhere below: not a repository, as before.
+  assert.match(run('work.js', ['--dir', home], '', w.extra), /not in a Git repository/);
+
+  run('hook.js', [], skillUsed('abc', w.repo, 'implement-it', '#20'));
+  const out = run('work.js', ['--dir', home], '', w.extra);
+  assert.match(out, /someone\/project · ⎇ feat\/shared/);
+  assert.match(out, /Following repo, where a pipeline skill ran last/);
+  assert.match(out, /\[implement-it\]/);
+  assert.match(status(), /^Step \[implement-it\] next review-it/);
+
+  // Older than two hours: no longer followed.
+  const file = path.join(home, '.claude', 'pulse', 'pipeline', 'abc.json');
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), at: Date.now() - 3 * 3600000 }));
+  assert.match(run('work.js', ['--dir', home], '', w.extra), /not in a Git repository/);
+});
+
+test('shared branch: the milestone comes from the issues the branch\'s own commits reference', () => {
+  const { home, run } = sandbox();
+  // A real repository: main, then a shared branch whose commits reference #20 and #21.
+  const repo = path.join(home, 'shared-repo');
+  fs.mkdirSync(repo);
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  git('init', '-q', '-b', 'main');
+  git('remote', 'add', 'origin', 'https://github.com/someone/project.git');
+  git('commit', '-q', '--allow-empty', '-m', 'Start', '-m', 'Refs #5');
+  git('checkout', '-q', '-b', 'feat/everything');
+  git('commit', '-q', '--allow-empty', '-m', 'Pipeline step', '-m', 'Refs #20');
+  git('commit', '-q', '--allow-empty', '-m', 'Status line view', '-m', 'Closes #21');
+  const W = require(path.join(SCRIPTS, 'work.js'));
+  assert.deepStrictEqual(W.issuesFromCommits(W.repoInfo(repo)), [21, 20]); // newest first, not main's #5
+
+  const fake = workRepo(home, 'unused', {});
+  const set = (m21) => fs.writeFileSync(path.join(home, 'gh-data.json'), JSON.stringify({
+    'pr list': [],
+    'issue 20': { number: 20, title: 'Pipeline step', state: 'CLOSED', milestone: MILESTONE },
+    'issue 21': { number: 21, title: 'Status line view', state: 'OPEN', milestone: m21 },
+    'issue list': milestoneIssues,
+  }));
+  const show = () => run('work.js', ['--dir', repo], '', fake.extra);
+
+  // Both in one milestone: it's shown, and the newest referenced issue is the current one.
+  set(MILESTONE);
+  run('work.js', ['--refresh', '--dir', repo], '', fake.extra);
+  let out = show();
+  assert.match(out, /0\.4\.0: Orchestrator/);
+  assert.match(out, /In progress \(1\)[\s\S]*│ #21 Status line view +│/);
+
+  // Different milestones: nothing rather than a guess.
+  set({ title: 'Some other milestone' });
+  run('work.js', ['--refresh', '--dir', repo], '', fake.extra);
+  out = show();
+  assert.doesNotMatch(out, /Orchestrator ■|To do|Milestone/);
+  assert.match(out, /No issue or pull request found for this branch/);
+});

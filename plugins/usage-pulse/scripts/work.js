@@ -86,6 +86,29 @@ function ciStatus(checks) {
   return 'passing';
 }
 
+// The issues referenced ("Refs #N", "Closes #N", "Fixes #N") by the commits on
+// this branch that aren't on the default branch yet, newest first. Runs git,
+// so only from the background refresh.
+function issuesFromCommits(repo) {
+  const { execFileSync } = require('child_process');
+  const git = (args) => execFileSync('git', args, { cwd: repo.root, encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+  let base = null;
+  try { base = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']); } catch {}
+  for (const b of [base, 'origin/main', 'origin/master', 'main', 'master']) {
+    if (!b || b === repo.branch) continue;
+    try { git(['rev-parse', '--verify', '--quiet', b]); base = b; break; } catch { base = null; }
+  }
+  if (!base) return [];
+  let log = '';
+  try { log = git(['log', '--format=%B%x00', `${base}..HEAD`]); } catch { return []; }
+  const out = [];
+  for (const m of log.matchAll(/\b(?:refs|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)) {
+    const n = Number(m[1]);
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
 // `gh` with a time limit. PULSE_GH stands in for it in tests (a .js file is
 // run with node).
 function gh(args, cwd) {
@@ -109,7 +132,18 @@ function fetchFacts(repo, hint = null) {
   const p = (prs || [])[0];
   if (p) facts.pr = { number: p.number, title: p.title, state: String(p.state).toLowerCase(), ci: ciStatus(p.statusCheckRollup) };
 
-  const n = issueFromBranch(repo.branch) || (p && issueFromText(p.body)) || hint;
+  let n = issueFromBranch(repo.branch) || (p && issueFromText(p.body)) || hint;
+  // Nothing names an issue (a branch shared by a milestone): the issues this
+  // branch's own commits reference, if they all share one milestone.
+  if (!n) {
+    const refs = issuesFromCommits(repo);
+    const milestones = new Map();
+    for (const r of refs.slice(0, 10)) {
+      try { const i = gh(['issue', 'view', String(r), '--json', 'number,milestone'], repo.root); milestones.set(r, i.milestone ? i.milestone.title : null); } catch {}
+    }
+    const titles = new Set(milestones.values());
+    if (milestones.size && titles.size === 1 && !titles.has(null)) n = refs.find((r) => milestones.has(r));
+  }
   if (n) try {
     const i = gh(['issue', 'view', String(n), '--json', 'number,title,state,milestone'], repo.root);
     facts.issue = { number: i.number, title: i.title, state: String(i.state).toLowerCase() };
@@ -151,6 +185,18 @@ function refresh(repo) {
     L.writeJSON(file, facts);
     return facts;
   } finally { try { fs.unlinkSync(lock); } catch {} }
+}
+
+// The repository to show for a folder: the one it's in, or for a folder that
+// isn't in one (like Desktop\Projects), the repository below it where a
+// pipeline skill ran most recently, marked `followed`.
+function resolveRepo(dir, now = Date.now()) {
+  const own = repoInfo(dir);
+  if (own) return own;
+  let rec = null;
+  try { rec = require('./hook').latestBelow(dir, RECENT_MS, now); } catch {}
+  const repo = rec && repoInfo(rec.root);
+  return repo ? { ...repo, followed: true } : null;
 }
 
 function refreshInBackground(dir) {
@@ -308,6 +354,7 @@ function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {})
     if (v.repo.branch) head.push(dot, [`${a ? 'branch' : '⎇'} ${v.repo.branch}`, (s) => paint('magenta', s)]);
   }
   if (v.facts && v.facts.at) head.push(dot, [ago(v.facts.at, now), gray]);
+  if (v.repo && v.repo.followed) head.push(['\n'], [`Following ${path.basename(v.repo.root)}, where a pipeline skill ran last (this folder isn't a repository)`, gray]);
   if (v.milestone) {
     const m = v.milestone;
     head.push(['\n'], [m.title]);
@@ -406,12 +453,12 @@ function live(dir) {
   const footer = (w) => wrapPieces([['Refreshes while you work. Press q to quit.', label]], w).join('\n');
   let asked = 0;
   const draw = () => {
-    const repo = repoInfo(dir);
+    const repo = resolveRepo(dir);
     const facts = loadFacts(repo);
     // Stale: ask GitHub again, but not on every redraw while it's answering.
     if (repo && repo.branch && (!facts || Date.now() - facts.at > STALE_MS) && Date.now() - asked > 15000) {
       asked = Date.now();
-      refreshInBackground(dir);
+      refreshInBackground(repo.root);
     }
     let body;
     const width = process.stdout.columns || 100;
@@ -431,17 +478,17 @@ function live(dir) {
   setInterval(draw, 2000);
 }
 
-module.exports = { statusRows, repoInfo, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
+module.exports = { statusRows, repoInfo, resolveRepo, issuesFromCommits, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
   const i = args.indexOf('--dir');
   const dir = i >= 0 && args[i + 1] ? args[i + 1] : process.cwd();
   if (args.includes('--live')) live(dir);
-  else if (args.includes('--refresh')) { try { refresh(repoInfo(dir)); } catch {} }
+  else if (args.includes('--refresh')) { try { refresh(resolveRepo(dir)); } catch {} }
   else {
     try {
-      const repo = repoInfo(dir);
+      const repo = resolveRepo(dir);
       process.stdout.write(render(view(repo, loadFacts(repo), pipelineFor(repo)), { width: Number(process.env.COLUMNS) || process.stdout.columns || 100 }) + '\n');
     } catch { process.stdout.write('Orchestrator\n'); }
   }

@@ -81,21 +81,32 @@ function prune(now = Date.now()) {
   }
 }
 
-// The latest step recorded in this repository within `maxAge`, from any session.
-function latestFor(root, maxAge, now = Date.now()) {
+// The latest step recorded within `maxAge`, from any session, whose
+// repository `matches`.
+function latest(matches, maxAge, now = Date.now()) {
   let best = null;
   let files = [];
   try { files = fs.readdirSync(PIPELINE_DIR); } catch { return null; }
   for (const f of files) {
     if (!f.endsWith('.json')) continue;
     const r = L.readJSON(path.join(PIPELINE_DIR, f), null);
-    if (!r || r.root !== root || !STEPS.includes(r.step) || !(now - r.at <= maxAge)) continue;
+    if (!r || typeof r.root !== 'string' || !matches(r.root) || !STEPS.includes(r.step) || !(now - r.at <= maxAge)) continue;
     if (!best || r.at > best.at) best = r;
   }
   return best;
 }
 
-module.exports = { STEPS, stepOf, issueOf, fromPayload, record, latestFor, sessionRecord, PIPELINE_DIR };
+// Is `root` a folder somewhere below `dir`? (Not `dir` itself.)
+function isBelow(dir, root) {
+  const rel = path.relative(path.resolve(dir), path.resolve(root));
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+const latestFor = (root, maxAge, now) => latest((r) => r === root, maxAge, now);
+// For a folder that isn't a repository itself, like Desktop\Projects.
+const latestBelow = (dir, maxAge, now) => latest((r) => isBelow(dir, r), maxAge, now);
+
+module.exports = { STEPS, stepOf, issueOf, fromPayload, record, latestFor, latestBelow, isBelow, sessionRecord, PIPELINE_DIR };
 
 if (require.main === module) {
   try {

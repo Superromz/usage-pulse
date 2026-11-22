@@ -124,7 +124,10 @@ function workRows(input, cfg, now, cols) {
   const rec = H.sessionRecord(input.session_id);
   if (cfg.mode !== 'orchestrator' && !(rec && now - rec.at < 10 * 60000)) return null;
   const W = require('./work');
-  const repo = W.repoInfo((input.workspace && input.workspace.current_dir) || input.cwd || process.cwd());
+  const dir = (input.workspace && input.workspace.current_dir) || input.cwd || process.cwd();
+  // Claude started in a parent folder (like Desktop\Projects): the repository
+  // below it where this session last used a pipeline skill.
+  const repo = W.repoInfo(dir) || (rec && H.isBelow(dir, rec.root) ? W.repoInfo(rec.root) : null);
   // Only this session's own step, and only while it still counts (2 hours).
   const pipeline = rec && repo && rec.root === repo.root && now - rec.at < 2 * 3600000 ? rec : null;
   return W.statusRows(W.view(repo, W.loadFacts(repo), pipeline), { width: cols || 200, cfg });

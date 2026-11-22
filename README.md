@@ -205,6 +205,11 @@ To do (1)                 In progress (1)           Done (3)
 - Titles wrap onto as many lines as they need, and on a narrow pane the three columns stack. Resize
   it any way you like: nothing gets cut off.
 
+On a branch shared by a whole milestone, whose name has no issue number and that has no pull request
+yet, it looks at the branch's own commits that aren't on the default branch: the issues they
+reference (`Refs #42`, `Closes #42`, `Fixes #42`) lead to their milestone, and the newest one is the
+current issue. If those issues are in different milestones, it shows no milestone rather than guess.
+
 It asks GitHub through the [`gh` command](https://cli.github.com), in the background and about once a
 minute; the status line never does. Without `gh`, signed out, or outside a repository, it shows
 what it knows and says what's missing.
@@ -222,6 +227,10 @@ Step lab-it ▶ plan-it ▶ [implement-it] ▶ review-it ▶ ship-it · next rev
 Each repository shows the step of the session working in it, and nothing from other sessions. That
 issue also finds the milestone when the branch name doesn't say, such as a branch shared by a whole
 milestone. After two hours without one of these skills, the pane goes back to the stage from GitHub.
+
+Started Claude in a folder above your repositories, like `Desktop\Projects`? The pane and the status
+line then follow the repository below it where one of these skills ran most recently, and the pane
+says which one it's following.
 The hook only writes to `~/.claude/pulse/pipeline/`, and never slows down or stops what Claude is doing.
 
 ### In the status line
