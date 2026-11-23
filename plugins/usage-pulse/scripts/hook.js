@@ -53,13 +53,24 @@ function record(p, now = Date.now()) {
   // A new step without a clear issue keeps the issue this session was on.
   const prev = L.readJSON(recordFile(p.session_id), null);
   if (!rec.issue && prev && prev.root === rec.root && prev.issue) rec.issue = prev.issue;
+  // The first pipeline skill in a session opens the orchestrator pane by
+  // itself (pulse.js decides how, and whether auto-open is on); never again in
+  // that session, even after it's closed.
+  const open = !(prev && prev.opened);
+  rec.opened = true;
   L.writeJSON(recordFile(p.session_id), rec);
   prune(now);
+  const { spawn } = require('child_process');
+  const bg = (args) => spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  if (open) try {
+    const args = [path.join(__dirname, 'pulse.js'), 'orchestrator', '--auto', '--dir', repo.root];
+    // PULSE_OPEN_LOG stands in for opening it, in tests.
+    if (process.env.PULSE_OPEN_LOG) fs.appendFileSync(process.env.PULSE_OPEN_LOG, `${args.slice(1).join(' ')}\n`);
+    else if (!process.env.PULSE_NO_OPEN) bg(args);
+  } catch {}
   // Ask GitHub now, in the background, so the status line's orchestrator view
   // (which only reads the cache) has the issue and milestone.
-  if (!process.env.PULSE_NO_REFRESH) try {
-    require('child_process').spawn(process.execPath, [path.join(__dirname, 'work.js'), '--refresh', '--dir', repo.root], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-  } catch {}
+  if (!process.env.PULSE_NO_REFRESH) try { bg([path.join(__dirname, 'work.js'), '--refresh', '--dir', repo.root]); } catch {}
   return rec;
 }
 

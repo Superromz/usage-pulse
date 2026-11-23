@@ -14,7 +14,9 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').replace(/\x1b\]8;[^\x07]*\
 
 function sandbox() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pulse-test-'));
-  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, PULSE_NO_CLIPBOARD: '1', PULSE_NO_OPEN: '1', PULSE_NO_REFRESH: '1', PULSE_NOTIFY_LOG: path.join(home, 'notifications.log'), NO_COLOR: '', COLUMNS: '' };
+  // No terminal of its own (the tests may run inside Warp or Windows Terminal).
+  const outside = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(WARP_|WT_SESSION$|TERM_PROGRAM$)/.test(k)));
+  const env = { ...outside, HOME: home, USERPROFILE: home, APPDATA: home, XDG_DATA_HOME: path.join(home, '.local', 'share'), PULSE_NO_CLIPBOARD: '1', PULSE_NO_OPEN: '1', PULSE_NO_REFRESH: '1', PULSE_NOTIFY_LOG: path.join(home, 'notifications.log'), NO_COLOR: '', COLUMNS: '' };
   const run = (file, args = [], input = '', extra = {}) => execFileSync(process.execPath, [path.join(SCRIPTS, file), ...args], { input, env: { ...env, ...extra }, encoding: 'utf8' });
   // Run lib/scan code inside the sandbox (they resolve HOME when they load).
   const js = (code) => JSON.parse(execFileSync(process.execPath, ['-e',
@@ -924,10 +926,56 @@ test('orchestrator: the status line never asks GitHub', () => {
 
 test('orchestrator command opens a pane next to Claude, or says how', () => {
   const { home, run } = sandbox();
-  const out = run('pulse.js', ['orchestrator'], '', { WT_SESSION: '', TERM_PROGRAM: 'WarpTerminal' });
-  assert.match(out, /Split the window with (Ctrl\+Shift|Cmd)\+D in Warp/);
+  const out = run('pulse.js', ['orchestrator']);
+  assert.match(out, /Split the window with your terminal's split-pane shortcut/);
   assert.match(out, /work\.js" --live --dir "/);
   assert.ok(fs.existsSync(path.join(home, '.claude', 'pulse', 'bin', 'work.js')));
+  // Opening by itself where it can't: nothing at all.
+  assert.strictEqual(run('pulse.js', ['orchestrator', '--auto']), '');
+});
+
+test('in Warp it opens as a new tab, through a Tab Config, and Claude\'s tab stays in front', () => {
+  const { home, run } = sandbox();
+  const warp = { WARP_CLIENT_VERSION: 'v0.2026.11.03.17.08.stable_00', WARP_FOCUS_URL: 'warp://session/abc' };
+  const folder = process.platform === 'win32' ? path.join(home, 'warp', 'Warp', 'data', 'tab_configs')
+    : process.platform === 'darwin' ? path.join(home, '.warp', 'tab_configs') : path.join(home, '.local', 'share', 'warp-terminal', 'tab_configs');
+  const dir = path.join(home, 'my project');
+  fs.mkdirSync(dir);
+  let out = run('pulse.js', ['orchestrator', '--dir', dir], '', warp);
+  assert.match(out, /Opened the orchestrator in a new Warp tab; this tab stays in front\./);
+  const toml = fs.readFileSync(path.join(folder, 'usage_pulse_work.toml'), 'utf8');
+  assert.match(toml, /^name = "Orchestrator"$/m);
+  assert.match(toml, /^type = "terminal"$/m);
+  assert.ok(toml.includes(`directory = ${JSON.stringify(dir)}`), toml);
+  assert.match(toml, /^commands = \["node \\"[^"]*\/\.claude\/pulse\/bin\/work\.js\\" --live --dir \\"[^"]*my project\\""\]$/m);
+  // The live dashboard the same way, on its own Tab Config.
+  out = run('pulse.js', ['live'], '', warp);
+  assert.match(out, /Opened the live dashboard in a new Warp tab/);
+  assert.match(fs.readFileSync(path.join(folder, 'usage_pulse_dash.toml'), 'utf8'), /dash\.js\\" --live --dir/);
+  // auto-open off: opening by itself does nothing, the command still works.
+  run('pulse.js', ['settings', 'auto-open', 'off']);
+  fs.rmSync(folder, { recursive: true });
+  assert.strictEqual(run('pulse.js', ['orchestrator', '--auto', '--dir', dir], '', warp), '');
+  assert.ok(!fs.existsSync(folder));
+  assert.match(run('pulse.js', ['orchestrator', '--dir', dir], '', warp), /new Warp tab/);
+});
+
+test('auto-open: the first pipeline skill in a session opens the pane, once', () => {
+  const { home, run } = sandbox();
+  const w = workRepo(home, 'feat/x', {});
+  const log = path.join(home, 'opened.log');
+  const opened = () => { try { return fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean); } catch { return []; } };
+  run('hook.js', [], skillUsed('one', w.repo, 'plan-it'), { PULSE_OPEN_LOG: log });
+  assert.deepStrictEqual(opened(), [`orchestrator --auto --dir ${w.repo}`]);
+  // More skills in that session: nothing new. Another session: its own first time.
+  run('hook.js', [], skillUsed('one', w.repo, 'implement-it'), { PULSE_OPEN_LOG: log });
+  run('hook.js', [], promptSent('one', w.repo, '/review-it'), { PULSE_OPEN_LOG: log });
+  assert.strictEqual(opened().length, 1);
+  run('hook.js', [], skillUsed('two', w.repo, 'ship-it'), { PULSE_OPEN_LOG: log });
+  assert.strictEqual(opened().length, 2);
+  // Not for skills outside the pipeline.
+  run('hook.js', [], skillUsed('three', w.repo, 'code-review'), { PULSE_OPEN_LOG: log });
+  assert.strictEqual(opened().length, 2);
 });
 
 // What Claude Code hands the hook when a skill runs, or a prompt is sent.

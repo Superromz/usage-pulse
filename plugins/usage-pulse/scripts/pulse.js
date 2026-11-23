@@ -151,22 +151,63 @@ function share() {
   console.log('It shows your activity grid, tokens, active days and streaks; no cost or project names.');
 }
 
-// Open a live view next to Claude. Windows Terminal can split itself; other
-// terminals get the command on the clipboard.
-function openPane(what, file, args, cmd) {
+// Warp sets these (TERM_PROGRAM isn't always there, such as on Windows).
+const inWarp = () => !!(process.env.WARP_CLIENT_VERSION || process.env.WARP_TERMINAL_SESSION_UUID || process.env.TERM_PROGRAM === 'WarpTerminal');
+
+// Open links one after another in the background, a moment apart.
+function openUrls(urls) {
+  if (process.env.PULSE_NO_OPEN) return;
+  const opener = `const { execFile } = require('child_process');
+    const open = (u) => process.platform === 'win32' ? execFile('cmd.exe', ['/c', 'start', '', u], { windowsHide: true }) : execFile(process.platform === 'darwin' ? 'open' : 'xdg-open', [u]);
+    process.argv.slice(1).forEach((u, i) => setTimeout(() => open(u), i * 1500));`;
+  require('child_process').spawn(process.execPath, ['-e', opener, ...urls], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+}
+
+// Warp can't split the current tab from outside, but it opens a Tab Config (a
+// .toml in its tab_configs folder) as a new tab through a warp:// link, and
+// WARP_FOCUS_URL brings Claude's tab back to the front right after.
+function warpTab(name, title, dir, command) {
+  const preview = /preview/i.test(process.env.WARP_CLIENT_VERSION || '');
+  const folder = process.platform === 'win32' ? path.join(process.env.APPDATA || '', 'warp', preview ? 'WarpPreview' : 'Warp', 'data', 'tab_configs')
+    : process.platform === 'darwin' ? path.join(os.homedir(), preview ? '.warp-preview' : '.warp', 'tab_configs')
+    : path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), preview ? 'warp-terminal-preview' : 'warp-terminal', 'tab_configs');
+  fs.mkdirSync(folder, { recursive: true });
+  // A JSON string is also a valid TOML string.
+  const q = JSON.stringify;
+  fs.writeFileSync(path.join(folder, `${name}.toml`), [
+    '# Written by Usage Pulse to open its live pane in a new tab. Safe to delete.',
+    `name = ${q(title)}`, `title = ${q(title)}`, '',
+    '[[panes]]', 'id = "main"', 'type = "terminal"', `directory = ${q(dir)}`, `commands = [${q(command)}]`, '',
+  ].join('\n'));
+  openUrls([`${preview ? 'warppreview' : 'warp'}://tab_config/${name}`, ...(process.env.WARP_FOCUS_URL ? [process.env.WARP_FOCUS_URL] : [])]);
+}
+
+// Open a live view next to Claude: a split pane in Windows Terminal, a new
+// tab in Warp. Elsewhere the command goes on the clipboard, except when
+// opening by itself (`auto`), which then does nothing.
+function openPane(what, file, args, cmd, { auto = false, dir = process.cwd() } = {}) {
   const { spawn, execSync } = require('child_process');
   if (process.env.WT_SESSION) {
     spawn('wt.exe', ['-w', '0', 'sp', '-V', '-s', '0.45', 'node', path.join(BIN, file), ...args], { detached: true, stdio: 'ignore' }).unref();
     console.log(`Opened the ${what} in a Windows Terminal split pane.`);
     return;
   }
+  if (inWarp()) {
+    try {
+      const run = [`node "${path.join(BIN, file).replace(/\\/g, '/')}"`, ...args.map((x) => (x.startsWith('--') ? x : `"${x.replace(/\\/g, '/')}"`))].join(' ');
+      warpTab(`usage_pulse_${path.basename(file, '.js')}`, what === 'orchestrator' ? 'Orchestrator' : 'Usage', dir, run);
+      console.log(`Opened the ${what} in a new Warp tab${process.env.WARP_FOCUS_URL ? '; this tab stays in front' : ''}.`);
+      return;
+    } catch {}
+  }
+  if (auto) return;
   let copied = false;
   if (!process.env.PULSE_NO_CLIPBOARD) try {
     const clip = process.platform === 'win32' ? 'clip' : process.platform === 'darwin' ? 'pbcopy' : 'xclip -selection clipboard';
     execSync(clip, { input: cmd, stdio: ['pipe', 'ignore', 'ignore'] });
     copied = true;
   } catch {}
-  const split = process.env.TERM_PROGRAM === 'WarpTerminal'
+  const split = inWarp()
     ? (process.platform === 'darwin' ? 'Cmd+D' : 'Ctrl+Shift+D') + ' in Warp'
     : 'your terminal\'s split-pane shortcut';
   console.log(`Split the window with ${split}, then paste and run${copied ? ' (already copied to your clipboard)' : ''}:`);
@@ -180,11 +221,18 @@ function live() {
 
 // What you're working on in this repository, next to Claude. Asking GitHub
 // starts now, so the pane has something to show when it opens.
+//   pulse.js orchestrator [--auto] [--dir <folder>]
+// --auto is the hook opening it by itself (hook.js): only where it can open in
+// one step, and not at all with the auto-open setting off.
 function orchestrator() {
+  const argv = process.argv.slice(3);
+  const auto = argv.includes('--auto');
+  const k = argv.indexOf('--dir');
+  const dir = k >= 0 && argv[k + 1] ? argv[k + 1] : process.cwd();
+  if (auto && L.loadConfig().autoOpen === false) return;
   installScripts();
-  const dir = process.cwd();
   try { require('child_process').spawn(process.execPath, [path.join(BIN, 'work.js'), '--refresh', '--dir', dir], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch {}
-  openPane('orchestrator', 'work.js', ['--live', '--dir', dir], node('work.js', ` --live --dir "${dir.replace(/\\/g, '/')}"`));
+  openPane('orchestrator', 'work.js', ['--live', '--dir', dir], node('work.js', ` --live --dir "${dir.replace(/\\/g, '/')}"`), { auto, dir });
 }
 
 // /usage-pulse:settings: list every setting, show one, or change one.

@@ -49,6 +49,10 @@ const OPTIONS = [
     help: 'What the status line shows: usage, or what you\'re working on (orchestrator). auto shows the orchestrator while a lab-it to ship-it skill is active in the session.',
   },
   {
+    name: 'auto-open', key: 'autoOpen', default: true, ...onOff,
+    help: 'Open the orchestrator pane by itself the first time a lab-it to ship-it skill starts in a session (Windows Terminal and Warp).',
+  },
+  {
     name: 'grid', key: 'grid', default: true, ...onOff,
     help: 'The activity grid in the status line.',
   },

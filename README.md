@@ -70,6 +70,7 @@ second, with no restart.
 | `activity` | `on` (default), `off` | The lifetime summary and activity grid in the status line (`off` hides both). |
 | `layout` | `auto` (default), `compact` | `compact` keeps the status line to its two main rows at any width. |
 | `mode` | `auto` (default), `usage`, `orchestrator` | What the status line shows. `auto` shows usage, and what you're working on while a `lab-it` … `ship-it` skill is active. See [The orchestrator](#the-orchestrator). |
+| `auto-open` | `on` (default), `off` | Open the orchestrator pane by itself the first time a `lab-it` … `ship-it` skill starts in a session (Windows Terminal and Warp). |
 | `grid` | `on` (default), `off` | The activity grid on its own. |
 | `summary` | `on` (default), `off` | The lifetime summary (lifetime, past year, streak, busiest day) on its own. |
 | `branch` | `on` (default), `off` | The git branch. |
@@ -156,8 +157,9 @@ cost and project names, and needs nothing from the internet to display. Post the
 ## The dashboard
 
 `/usage-pulse:dashboard` prints the full picture. `/usage-pulse:live` opens it next to Claude
-and keeps it up to date (in Windows Terminal it splits the window for you; elsewhere it copies the
-`usage-pulse` command so you can paste it into a split pane). In the live view, hover any square in
+and keeps it up to date (in Windows Terminal it splits the window for you; in Warp it opens a new
+tab, and keeps Claude's tab in front; elsewhere it copies the `usage-pulse` command so you can
+paste it into a split pane). In the live view, hover any square in
 the activity grid to see that day's tokens and replies. It's the same pane as
 [the orchestrator](#the-orchestrator), opened on your usage: press ↑ or ↓ for the board.
 
@@ -176,7 +178,11 @@ the activity grid to see that day's tokens and replies. It's the same pane as
 ## The orchestrator
 
 `/usage-pulse:orchestrator` opens what you're working on next to Claude, the same way
-`/usage-pulse:live` opens the dashboard, and keeps it up to date while you work. For the repository
+`/usage-pulse:live` opens the dashboard, and keeps it up to date while you work. You often don't
+need to: the first time a `lab-it` … `ship-it` skill starts in a Claude session, it opens by itself
+(a split pane in Windows Terminal, a new tab in Warp; Warp can't split your tab from outside, so it
+writes a small Tab Config, `usage_pulse_work.toml`, in its `tab_configs` folder and opens that).
+That happens once per session, and `/usage-pulse:settings auto-open off` turns it off. For the repository
 Claude is in, it shows a header and the milestone as a board:
 
 ```
