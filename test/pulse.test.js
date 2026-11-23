@@ -1204,3 +1204,111 @@ test('shared branch: the milestone comes from the issues the branch\'s own commi
   assert.doesNotMatch(out, /Orchestrator ■|To do|Milestone/);
   assert.match(out, /No issue or pull request found for this branch/);
 });
+
+// Pretend repositories below `home`, and session records of Claude working in them.
+function projectsIn(home, names) {
+  const dirs = {};
+  for (const n of names) {
+    dirs[n] = path.join(home, 'code', n);
+    fs.mkdirSync(path.join(dirs[n], '.git'), { recursive: true });
+    fs.writeFileSync(path.join(dirs[n], '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  }
+  const sessions = path.join(home, '.claude', 'pulse', 'sessions');
+  fs.mkdirSync(sessions, { recursive: true });
+  const session = (sid, cwd, minutesAgo, project = path.join(home, 'code')) => fs.writeFileSync(path.join(sessions, `${sid}.json`), JSON.stringify({ sid, days: {}, seen: Date.now() - minutesAgo * 60000, project, cwd }));
+  return { dirs, session };
+}
+
+test('pane: recent projects, most recent first, switched by number', () => {
+  const { home, run } = sandbox();
+  const { dirs, session } = projectsIn(home, ['alpha', 'beta', 'gamma']);
+  session('s1', dirs.alpha, 30);
+  session('s2', dirs.beta, 5); // started in the parent folder, working in beta
+  session('s3', dirs.gamma, 8 * 24 * 60); // over a week ago
+  session('s4', path.join(home, 'code'), 1); // a folder that isn't a repository
+  const frame = (...args) => strip(run('work.js', ['--frame', '--dir', path.join(home, 'code'), ...args], '', { COLUMNS: '100' }));
+
+  // From the parent folder: beta (most recent) shown first, then alpha; gamma and the parent aren't listed.
+  let out = frame();
+  assert.match(out.split('\n')[0], /^\[1 beta\] 2 alpha$/);
+  assert.match(out, /\[Board\] Usage/);
+  assert.match(out, /Orchestrator · beta/);
+  assert.doesNotMatch(out, /gamma/);
+  // Pressing 2.
+  out = frame('--project', '2');
+  assert.match(out.split('\n')[0], /^1 beta \[2 alpha\]$/);
+  assert.match(out, /Orchestrator · alpha/);
+  // Opened for a repository that isn't recent: it's listed first and shown.
+  const { dirs: more } = projectsIn(home, ['delta']);
+  out = strip(run('work.js', ['--frame', '--dir', more.delta], '', { COLUMNS: '100' }));
+  assert.match(out.split('\n')[0], /^\[1 delta\] 2 beta 3 alpha$/);
+  // ↓: the usage dashboard in the same pane.
+  out = frame('--view', 'usage');
+  assert.match(out, /Board \[Usage\]/);
+  assert.match(out, /Claude Usage/);
+  assert.doesNotMatch(out, /Orchestrator ·/);
+});
+
+test('pane: a card that changes column is highlighted for a few seconds', () => {
+  const W = require(path.join(SCRIPTS, 'work.js'));
+  const cols = (todo, doing, done) => ({ todo: todo.map((number) => ({ number })), doing: doing.map((number) => ({ number })), done: done.map((number) => ({ number })) });
+  const state = {};
+  const t = 1e12;
+  // The first look highlights nothing.
+  assert.deepStrictEqual([...W.trackMoves(state, '/a', cols([2, 3], [1], []), t)], []);
+  // #1 closes and #2 is picked up: both highlighted, #3 not.
+  assert.deepStrictEqual([...W.trackMoves(state, '/a', cols([3], [2], [1]), t + 2000)].sort(), [1, 2]);
+  // Another project in between doesn't disturb it, and after a few seconds the highlight goes.
+  W.trackMoves(state, '/b', cols([9], [], []), t + 3000);
+  assert.deepStrictEqual([...W.trackMoves(state, '/a', cols([3], [2], [1]), t + 4000)].sort(), [1, 2]);
+  assert.deepStrictEqual([...W.trackMoves(state, '/a', cols([3], [2], [1]), t + 8000)], []);
+
+  // On the board: a green edge and "just moved".
+  const v = { repo: { root: '/a', name: 'a/b', branch: 'main' }, stage: 'Implementing', columns: { todo: [], doing: [], done: [{ number: 1, title: 'Done thing', state: 'closed' }] } };
+  const out = strip(W.render(v, { width: 100, cfg: { ascii: false }, moved: new Set([1]) }));
+  assert.match(out, /✓ done · just moved/);
+  assert.doesNotMatch(strip(W.render(v, { width: 100, cfg: { ascii: false } })), /just moved/);
+});
+
+test('pane: every line fits in both views, and plain mode has no symbols', () => {
+  const { home, run } = sandbox();
+  const { dirs, session } = projectsIn(home, ['a-project-with-a-rather-long-name', 'another-one-that-is-long-as-well', 'short']);
+  for (const [i, d] of Object.values(dirs).entries()) session(`s${i}`, d, i + 1);
+  for (const plain of [false, true]) {
+    if (plain) run('pulse.js', ['plain', 'on']);
+    for (const view of ['board', 'usage']) for (const cols of [40, 60, 100]) {
+      const out = strip(run('work.js', ['--frame', '--dir', path.join(home, 'code'), '--view', view], '', { COLUMNS: String(cols) }));
+      for (const line of out.split('\n')) assert.ok([...line].length <= cols, `${view} ${cols}: ${line}`);
+      assert.match(out, plain ? /up\/down: board or usage/ : /↑\/↓ board or usage/);
+      if (plain && view === 'board') assert.doesNotMatch(out, /[╭╮╰╯┌┐└┘─│⎇·▶✓■□…↑↓←→–]/);
+    }
+  }
+});
+
+test('pane: hovering the usage view still finds the day under the pointer', () => {
+  const { home, js } = sandbox();
+  writeLifetime(home);
+  const { dirs, session } = projectsIn(home, ['alpha']);
+  session('s1', dirs.alpha, 1);
+  // Where the pane says each square is, a square is drawn, for that day.
+  const r = js(`const W = require(${JSON.stringify(path.join(SCRIPTS, 'work.js'))});
+    const hits = []; const frame = W.paneFrame(${JSON.stringify(dirs.alpha)}, { view: 'usage' }, { width: 120, hits });
+    const lines = frame.split('\\n').map((l) => [...l.replace(/\\x1b\\[[0-9;]*m/g, '').replace(/\\x1b\\]8;[^\\x07]*\\x07/g, '')]);
+    return { n: hits.length, ok: hits.every((h) => /[■#]/.test((lines[h.line] || [])[h.col] || '')), days: new Set(hits.map((h) => h.day)).size };`);
+  assert.ok(r.n > 300, String(r.n));
+  assert.ok(r.ok, 'every hover position is on a square');
+  assert.strictEqual(r.days, r.n);
+});
+
+test('the live dashboard opens the same pane, on the usage view', () => {
+  const { home, env } = sandbox();
+  const { dirs, session } = projectsIn(home, ['alpha']);
+  session('s1', dirs.alpha, 1);
+  // It keeps running until q, so let it draw for a moment, then stop it.
+  let out = '';
+  try { execFileSync(process.execPath, [path.join(SCRIPTS, 'dash.js'), '--live', '--dir', dirs.alpha], { env: { ...env, COLUMNS: '100' }, encoding: 'utf8', timeout: 3000 }); } catch (e) { out = String(e.stdout || ''); }
+  out = out.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+  assert.match(out, /\[1 alpha\]/);
+  assert.match(out, /Board \[Usage\]/);
+  assert.match(out, /Claude Usage/);
+});

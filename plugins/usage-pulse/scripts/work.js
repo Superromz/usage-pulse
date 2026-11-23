@@ -338,7 +338,7 @@ function boxed(lines, width, ch, color) {
 //   …
 // Three columns side by side when there's room, stacked otherwise. Every
 // line fits `width`; nothing is cut off.
-function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {}) {
+function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig(), moved = new Set() } = {}) {
   const a = cfg.ascii;
   width = Math.max(20, width);
   const HEAD = a ? { tl: '+', tr: '+', bl: '+', br: '+', h: '-', v: '|' } : { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
@@ -394,8 +394,10 @@ function render(v, { width = 100, now = Date.now(), cfg = L.loadConfig() } = {})
         : i.openPr ? ['pull request open', (s) => paint('cyan', s)]
         : i.blocked ? [i.waitsOn && i.waitsOn.length ? `waits on ${i.waitsOn.map((n) => `#${n}`).join(', ')}` : 'blocked', (s) => paint('red', s)]
         : ['ready', gray];
-      const body = wrapPieces([[`#${i.number}`, cyan], [i.title || '', col === 'done' ? gray : (s) => s], ['\n'], status], colW - 4);
-      return boxed(body, colW, CARD, col === 'doing' ? 'yellow' : 'gray');
+      // A card that just changed column says so, with a green edge, for a few seconds.
+      const fresh = moved.has(i.number);
+      const body = wrapPieces([[`#${i.number}`, cyan], [i.title || '', col === 'done' ? gray : (s) => s], ['\n'], status, ...(fresh ? [dot, ['just moved', (s) => paint('green', s)]] : [])], colW - 4);
+      return boxed(body, colW, CARD, fresh ? 'green' : col === 'doing' ? 'yellow' : 'gray');
     };
     const columns = [['To do', 'todo'], ['In progress', 'doing'], ['Done', 'done']].map(([name, key]) => [
       bold(`${name} (${cols[key].length})`),
@@ -449,28 +451,163 @@ function statusRows(v, { width = 200, cfg = L.loadConfig() } = {}) {
   return [top, bottom].filter((r) => r.length).map((r) => fit(r.join(GAP), width, a));
 }
 
-function live(dir) {
-  const footer = (w) => wrapPieces([['Refreshes while you work. Press q to quit.', label]], w).join('\n');
-  let asked = 0;
-  const draw = () => {
-    const repo = resolveRepo(dir);
-    const facts = loadFacts(repo);
-    // Stale: ask GitHub again, but not on every redraw while it's answering.
-    if (repo && repo.branch && (!facts || Date.now() - facts.at > STALE_MS) && Date.now() - asked > 15000) {
-      asked = Date.now();
-      refreshInBackground(repo.root);
-    }
-    let body;
-    const width = process.stdout.columns || 100;
-    try { body = render(view(repo, facts, pipelineFor(repo)), { width }); } catch { body = 'Orchestrator'; }
-    process.stdout.write(`\x1b[H\x1b[2J${body}\n\n${footer(width)}`);
+const WEEK_MS = 7 * 86400000;
+
+// Repositories worked in with Claude in the last 7 days, most recent first:
+// where sessions ran or are working now (the session records) and where a
+// pipeline skill ran (hook.js). Folders that aren't repositories don't count.
+function recentProjects(now = Date.now()) {
+  const found = new Map();
+  const add = (dir, at) => {
+    if (!dir || !at || now - at > WEEK_MS) return;
+    const repo = repoInfo(dir);
+    if (!repo) return;
+    const had = found.get(repo.root);
+    if (!had || at > had.at) found.set(repo.root, { repo, at });
   };
-  const quit = () => { process.stdout.write('\x1b[?25h\x1b[?1049l'); process.exit(0); };
-  process.stdout.write('\x1b[?1049h\x1b[?25l');
+  for (const s of L.loadSessions(8)) { add(s.cwd, s.seen); add(s.project, s.seen); }
+  try {
+    const { PIPELINE_DIR } = require('./hook');
+    for (const f of fs.readdirSync(PIPELINE_DIR)) {
+      const r = f.endsWith('.json') && L.readJSON(path.join(PIPELINE_DIR, f), null);
+      if (r) add(r.root, r.at);
+    }
+  } catch {}
+  return [...found.values()].sort((x, y) => y.at - x.at).map((x) => x.repo);
+}
+
+// Note which cards changed column since the last look at this project, and
+// return the ones that moved in the last few seconds (to highlight them).
+// `state.seen` and `state.movedAt` persist between redraws.
+function trackMoves(state, root, columns, now = Date.now()) {
+  const col = {};
+  for (const [name, cards] of Object.entries(columns || {})) for (const c of cards) col[c.number] = name;
+  state.seen = state.seen || {};
+  state.movedAt = state.movedAt || {};
+  const before = state.seen[root];
+  const moved = (state.movedAt[root] = state.movedAt[root] || {});
+  if (before) for (const [n, c] of Object.entries(col)) if (before[n] && before[n] !== c) moved[n] = now;
+  state.seen[root] = col;
+  return new Set(Object.keys(moved).filter((n) => now - moved[n] < 5000).map(Number));
+}
+
+// One frame of the pane: the project row, the Board/Usage tabs, then the
+// board or the usage dashboard, then the keys.
+//   state: { view: 'board' | 'usage', root, seen, movedAt }
+// The projects the pane offers: the recent ones, plus the one it was opened
+// for when that isn't among them. Numbered in this order.
+function paneProjects(dir, now = Date.now()) {
+  const start = resolveRepo(dir, now);
+  const projects = recentProjects(now);
+  if (start && !projects.some((p) => p.root === start.root)) projects.unshift(start);
+  return { start, projects };
+}
+
+// `hits`, when given, collects where each activity grid square is drawn
+// ({ line, col, day }, 0-based in this frame) for hovering in the usage view.
+function paneFrame(dir, state, { width = 100, now = Date.now(), cfg = L.loadConfig(), hits = null } = {}) {
+  const a = cfg.ascii;
+  const { start, projects } = paneProjects(dir, now);
+  if (!state.root || !projects.some((p) => p.root === state.root)) state.root = start ? start.root : projects[0] && projects[0].root;
+  state.view = state.view || 'board';
+  const shown = projects.find((p) => p.root === state.root) || null;
+  const repo = shown && start && shown.root === start.root ? start : shown;
+
+  const top = [];
+  projects.forEach((p, i) => {
+    const name = `${i < 9 ? `${i + 1} ` : ''}${path.basename(p.root)}`;
+    top.push(p.root === state.root ? [`[${name}]`, (s) => paint('bold', paint('yellow', s))] : [name, label]);
+  });
+  if (!projects.length) top.push(['no recent projects', label]);
+  top.push(['\n']);
+  for (const [key, name] of [['board', 'Board'], ['usage', 'Usage']]) top.push(state.view === key ? [`[${name}]`, (s) => paint('bold', s)] : [name, label]);
+  const lines = wrapPieces(top, width);
+
+  let body;
+  // The dashboard needs 70 columns; on a narrower pane its lines are trimmed.
+  if (state.view === 'usage') {
+    const squares = [];
+    body = require('./dash').render({ width, now, hits: squares }).split('\n').map((l) => fit(l, width, a)).join('\n');
+    // The dashboard starts below the project row, the tabs and a blank line.
+    if (hits) for (const h of squares) if (h.col < width) hits.push({ ...h, line: h.line + lines.length + 1 });
+  } else {
+    const v = view(repo, loadFacts(repo), pipelineFor(repo));
+    const moved = repo ? trackMoves(state, repo.root, v.columns, now) : new Set();
+    body = render(v, { width, now, cfg, moved });
+  }
+  const keys = a ? 'up/down: board or usage - left/right or 1-9: project - q: quit' : '↑/↓ board or usage · ←/→ or 1–9 project · q quit';
+  return [...lines, '', body, '', ...wrapPieces([[keys, label]], width)].join('\n');
+}
+
+// The live pane. `/usage-pulse:orchestrator` opens it on the board,
+// `/usage-pulse:live` and the `usage-pulse` command on the usage dashboard.
+function live(dir, { view: first = 'board' } = {}) {
+  const state = { view: first };
+  const asked = {};
+  let lastScan = 0;
+  let frame = '', hits = [], hover = null;
+  // Hovering a square of the activity grid shows that day's usage in a small
+  // box just below and right of the pointer, kept on screen.
+  const repaint = () => {
+    let out = `\x1b[H\x1b[2J${frame}`;
+    if (hover && state.view === 'usage') {
+      const text = ` ${require('./dash').dayTip(hover.day)} `;
+      const cols = process.stdout.columns || 100;
+      const x = Math.max(1, Math.min(hover.x + 2, cols - L.visWidth(text)));
+      out += `\x1b[${hover.y + 1};${x}H\x1b[48;2;40;44;52m\x1b[38;2;235;235;235m${text}\x1b[0m`;
+    }
+    process.stdout.write(out);
+  };
+  const draw = () => {
+    const width = process.stdout.columns || 100;
+    hits = [];
+    try { frame = paneFrame(dir, state, { width, hits }); } catch { frame = 'Orchestrator'; }
+    // Keep the shown project's GitHub data fresh, and the usage numbers.
+    try {
+      const repo = state.root && repoInfo(state.root);
+      const facts = loadFacts(repo);
+      if (repo && repo.branch && (!facts || Date.now() - facts.at > STALE_MS) && Date.now() - (asked[repo.root] || 0) > 15000) {
+        asked[repo.root] = Date.now();
+        refreshInBackground(repo.root);
+      }
+      if (state.view === 'usage' && Date.now() - lastScan > 30000) {
+        lastScan = Date.now();
+        require('child_process').spawn(process.execPath, [path.join(__dirname, 'scan.js'), '--quiet'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      }
+    } catch {}
+    repaint();
+  };
+  const quit = () => { process.stdout.write('\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l'); process.exit(0); };
+  const go = (step) => {
+    const list = paneProjects(dir).projects;
+    const at = list.findIndex((p) => p.root === state.root);
+    if (list.length) state.root = list[(at + step + list.length) % list.length].root;
+  };
+  // Alternate screen, hidden cursor, and mouse motion reports (SGR format).
+  process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h');
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);
     process.stdin.resume();
-    process.stdin.on('data', (b) => { const k = b.toString(); if (k === 'q' || k === '\x1b' || k === '\x03') quit(); });
+    process.stdin.on('data', (b) => {
+      const k = b.toString();
+      if (k === 'q' || k === '\x1b' || k === '\x03') return quit();
+      // Pointer at (x, y), 1-based terminal cells: which day's square is under it?
+      const m = [...k.matchAll(/\x1b\[<(\d+);(\d+);(\d+)[mM]/g)].pop();
+      if (m) {
+        const x = Number(m[2]), y = Number(m[3]);
+        const h = hits.find((s) => s.line === y - 1 && s.col === x - 1);
+        const next = h ? { day: h.day, x, y } : null;
+        if ((next && next.day) !== (hover && hover.day)) { hover = next; repaint(); }
+        return;
+      }
+      hover = null;
+      if (k === '\x1b[A' || k === '\x1b[B') state.view = state.view === 'board' ? 'usage' : 'board';
+      else if (k === '\x1b[C') go(1);
+      else if (k === '\x1b[D') go(-1);
+      else if (/^[1-9]$/.test(k)) { const p = paneProjects(dir).projects[Number(k) - 1]; if (p) state.root = p.root; }
+      else return;
+      draw();
+    });
   }
   process.on('SIGINT', quit);
   process.stdout.on('resize', draw);
@@ -478,7 +615,7 @@ function live(dir) {
   setInterval(draw, 2000);
 }
 
-module.exports = { statusRows, repoInfo, resolveRepo, issuesFromCommits, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
+module.exports = { live, paneFrame, paneProjects, recentProjects, trackMoves, statusRows, repoInfo, resolveRepo, issuesFromCommits, issueFromBranch, issueFromText, dependsOn, ciStatus, fetchFacts, refresh, view, render, loadFacts, cacheFile, pipelineFor };
 
 if (require.main === module) {
   const args = process.argv.slice(2);
@@ -486,6 +623,15 @@ if (require.main === module) {
   const dir = i >= 0 && args[i + 1] ? args[i + 1] : process.cwd();
   if (args.includes('--live')) live(dir);
   else if (args.includes('--refresh')) { try { refresh(resolveRepo(dir)); } catch {} }
+  // One frame of the live pane, as after pressing that project's number and
+  // ↑/↓ to that view: --frame [--project N] [--view usage]
+  else if (args.includes('--frame')) {
+    const opt = (name) => { const k = args.indexOf(name); return k >= 0 ? args[k + 1] : null; };
+    const state = { view: opt('--view') === 'usage' ? 'usage' : 'board' };
+    const n = Number(opt('--project'));
+    if (n) { const p = paneProjects(dir).projects[n - 1]; if (p) state.root = p.root; }
+    process.stdout.write(paneFrame(dir, state, { width: Number(process.env.COLUMNS) || process.stdout.columns || 100 }) + '\n');
+  }
   else {
     try {
       const repo = resolveRepo(dir);

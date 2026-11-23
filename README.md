@@ -158,7 +158,8 @@ cost and project names, and needs nothing from the internet to display. Post the
 `/usage-pulse:dashboard` prints the full picture. `/usage-pulse:live` opens it next to Claude
 and keeps it up to date (in Windows Terminal it splits the window for you; elsewhere it copies the
 `usage-pulse` command so you can paste it into a split pane). In the live view, hover any square in
-the activity grid to see that day's tokens and replies.
+the activity grid to see that day's tokens and replies. It's the same pane as
+[the orchestrator](#the-orchestrator), opened on your usage: press ↑ or ↓ for the board.
 
 - **Plan limits**: both windows with reset times and whether you're on track.
 - **Spending**: today, yesterday, the last 7 and 30 days, and this month against your monthly budget if you set one.
@@ -204,6 +205,17 @@ To do (1)                 In progress (1)           Done (3)
   label, or "Depends on #N" with #N still open in the same milestone).
 - Titles wrap onto as many lines as they need, and on a narrow pane the three columns stack. Resize
   it any way you like: nothing gets cut off.
+
+The pane is also where you get around, with the keyboard:
+
+- **↑/↓** switch between the board and your usage dashboard (the same as `/usage-pulse:live`).
+- **←/→** or **1–9** switch between projects. The row at the top lists the repositories you've
+  worked in with Claude in the last 7 days, most recent first, starting with the one the pane was
+  opened for.
+- When an issue changes column (picked up, pull request opened, closed), its card shows up in the
+  new column with a green edge and "just moved" for a few seconds.
+
+The pane only looks: it never changes anything on GitHub.
 
 On a branch shared by a whole milestone, whose name has no issue number and that has no pull request
 yet, it looks at the branch's own commits that aren't on the default branch: the issues they

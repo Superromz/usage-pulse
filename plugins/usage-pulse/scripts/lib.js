@@ -215,6 +215,9 @@ function recordSession(input, now = Date.now()) {
   const cw = input.context_window || {};
   rec.seen = now;
   rec.project = (input.workspace && input.workspace.project_dir) || input.cwd || rec.project;
+  // Where Claude is working now, which can be below where it started (the
+  // orchestrator lists these as recent projects).
+  rec.cwd = (input.workspace && input.workspace.current_dir) || input.cwd || rec.cwd;
   rec.name = input.session_name || rec.name;
   rec.model = (input.model && input.model.display_name) || rec.model;
   rec.ctx = cw.used_percentage != null ? { pct: cw.used_percentage, used: cw.total_input_tokens, size: cw.context_window_size } : rec.ctx;

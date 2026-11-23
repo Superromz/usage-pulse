@@ -175,7 +175,7 @@ function openPane(what, file, args, cmd) {
 
 function live() {
   installScripts();
-  openPane('live dashboard', 'dash.js', ['--live'], installCommand() ? 'usage-pulse' : node('dash.js', ' --live'));
+  openPane('live dashboard', 'dash.js', ['--live', '--dir', process.cwd()], installCommand() ? 'usage-pulse' : node('dash.js', ' --live'));
 }
 
 // What you're working on in this repository, next to Claude. Asking GitHub

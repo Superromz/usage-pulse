@@ -3,7 +3,7 @@
 // projects and models.
 //
 //   dash.js            print once
-//   dash.js --live     keep it open and refresh every 2 seconds (q to quit)
+//   dash.js --live     keep it open, in the orchestrator pane (q to quit)
 'use strict';
 
 const L = require('./lib');
@@ -204,53 +204,11 @@ function dayTip(day) {
   return `${G.longDate(day)} · ${t ? `${L.fmtTokens(t)} tokens` : 'no activity'}${r ? ` · ${r.toLocaleString('en-US')} replies` : ''}`;
 }
 
+// The live view is the orchestrator pane, opened on this dashboard: ↑/↓ go
+// to the board, ←/→ to other projects, and hovering a day still works.
 function live() {
-  const { spawn } = require('child_process');
-  const rescan = () => spawn(process.execPath, [require('path').join(__dirname, 'scan.js'), '--quiet'], { stdio: 'ignore', windowsHide: true });
-  let scanner = rescan(), lastScan = Date.now();
-  scanner.on('exit', () => { scanner = null; });
-  let frame = '', hits = [], hover = null;
-  const footer = label('  Hover a square for its day. Refreshes every 2 seconds. Press q to quit.');
-  const paintFrame = () => {
-    let out = `\x1b[H\x1b[2J${frame}\n${footer}`;
-    if (hover) {
-      // A small box just below and right of the pointer, kept on screen.
-      const text = ` ${dayTip(hover.day)} `;
-      const cols = process.stdout.columns || 100;
-      const x = Math.max(1, Math.min(hover.x + 2, cols - L.visWidth(text)));
-      out += `\x1b[${hover.y + 1};${x}H\x1b[48;2;40;44;52m\x1b[38;2;235;235;235m${text}\x1b[0m`;
-    }
-    process.stdout.write(out);
-  };
-  const draw = () => {
-    if (!scanner && Date.now() - lastScan > 30000) { scanner = rescan(); lastScan = Date.now(); scanner.on('exit', () => { scanner = null; }); }
-    hits = [];
-    frame = render({ width: process.stdout.columns || 100, hits });
-    paintFrame();
-  };
-  // Pointer at (x, y), 1-based terminal cells: which day's square is under it?
-  const dayAt = (x, y) => hits.find((h) => h.line === y - 1 && h.col === x - 1) || null;
-  const quit = () => { process.stdout.write('\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l'); process.exit(0); };
-  // Alternate screen, hidden cursor, and mouse motion reports (SGR format).
-  process.stdout.write('\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h');
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', (b) => {
-      const k = b.toString();
-      if (k === 'q' || k === '\x1b' || k === '\x03') return quit();
-      const m = [...k.matchAll(/\x1b\[<(\d+);(\d+);(\d+)[mM]/g)].pop();
-      if (!m) return;
-      const x = Number(m[2]), y = Number(m[3]);
-      const h = dayAt(x, y);
-      const next = h ? { day: h.day, x, y } : null;
-      if ((next && next.day) !== (hover && hover.day)) { hover = next; paintFrame(); }
-    });
-  }
-  process.on('SIGINT', quit);
-  process.stdout.on('resize', draw);
-  draw();
-  setInterval(draw, 2000);
+  const k = process.argv.indexOf('--dir');
+  require('./work').live(k >= 0 && process.argv[k + 1] ? process.argv[k + 1] : process.cwd(), { view: 'usage' });
 }
 
 module.exports = { render, dayTip };
